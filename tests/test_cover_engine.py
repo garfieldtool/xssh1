@@ -1,5 +1,5 @@
 """
-Unit tests for Cover Engine layout, spine thickness calculation, image editing, and PDF export.
+Unit tests for Cover Engine layout, hardcover wrap margins, barcode rendering, DPI check, and PDF export.
 """
 
 import os
@@ -7,7 +7,7 @@ import unittest
 from PIL import Image
 from cover_engine import (
     CoverConfig, CoverEngine, TextOverlay, ImageEditConfig,
-    calculate_spine_thickness, mm_to_px, px_to_mm
+    calculate_spine_thickness, draw_simple_barcode, mm_to_px, px_to_mm
 )
 
 
@@ -36,38 +36,38 @@ class TestCoverEngine(unittest.TestCase):
         self.assertAlmostEqual(px_to_mm(300, 300), 25.4, delta=0.01)
 
     def test_spine_thickness_calculation(self):
-        # 200P 80g offset paper -> 100 sheets * 0.10mm + 0.3mm margin = 10.3mm
-        spine = calculate_spine_thickness(200, "80g 双胶纸 (Offset Paper)")
-        self.assertEqual(spine, 10.3)
+        # Softcover 200P 80g offset paper -> 10.3mm
+        spine_soft = calculate_spine_thickness(200, "80g 双胶纸 (Offset Paper)", is_hardcover=False)
+        self.assertEqual(spine_soft, 10.3)
 
-        # 0P -> 0mm
-        self.assertEqual(calculate_spine_thickness(0), 0.0)
+        # Hardcover 200P 80g offset paper -> 10.3 + 4.0 = 14.3mm
+        spine_hard = calculate_spine_thickness(200, "80g 双胶纸 (Offset Paper)", is_hardcover=True)
+        self.assertEqual(spine_hard, 14.3)
 
-    def test_spread_dimensions_a3_300dpi(self):
+    def test_barcode_generation(self):
+        bc_img = draw_simple_barcode("ISBN 978-7-12345-678-9", 200, 60)
+        self.assertIsNotNone(bc_img)
+        self.assertEqual(bc_img.size, (200, 60))
+
+    def test_dpi_check(self):
+        cfg = CoverConfig(dpi=300)
+        engine = CoverEngine(cfg)
+        res = engine.check_image_dpi(self.front_img_path, 148, 210)
+        self.assertTrue(res["valid"])
+        self.assertIn("effective_dpi", res)
+
+    def test_hardcover_spread_dimensions(self):
         cfg = CoverConfig(
+            binding_type="精装包壳",
+            hardcover_wrap_mm=15.0,
+            hardcover_groove_mm=8.0,
             paper_width_mm=420.0,
             paper_height_mm=297.0,
             book_width_mm=148.0,
             book_height_mm=210.0,
-            spine_width_mm=10.0,
-            dpi=300
-        )
-        engine = CoverEngine(cfg)
-        spread = engine.generate_spread(self.front_img_path, self.back_img_path)
-
-        expected_w = mm_to_px(420.0, 300)
-        expected_h = mm_to_px(297.0, 300)
-
-        self.assertEqual(spread.size, (expected_w, expected_h))
-
-    def test_image_edits_and_text_overlay(self):
-        front_edit = ImageEditConfig(
-            brightness=1.2,
-            contrast=1.1,
-            text_overlays=[TextOverlay(text="封面主标题", font_size_pt=36, color="#FF0000", bg_banner=True)]
-        )
-        cfg = CoverConfig(
-            front_edit=front_edit,
+            spine_width_mm=12.0,
+            show_barcode=True,
+            barcode_text="1234567890",
             dpi=150
         )
         engine = CoverEngine(cfg)

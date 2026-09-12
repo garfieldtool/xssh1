@@ -1,13 +1,20 @@
 """
-Book Cover Layout Engine for Print Shops.
+Book Cover Layout Engine for Print Shops (Ultimate Edition).
 Generates print-ready A3/A4 spread covers with Back Cover, Spine, Front Cover, Crop Marks, and Fold Lines.
-Includes image color adjustments, custom text overlays, and page count spine thickness calculator.
+Supports:
+- Softcover (胶订平装) & Hardcover (精装包壳) with wrap edges (包边) & hinge grooves (沟槽).
+- Automatic Mirrored Bleed Extension (镜像延展出血) to eliminate white borders.
+- Barcode / ISBN / QR Code generation and placement.
+- Low-DPI resolution warnings.
+- Page Count & Paper Weight Spine Thickness Calculator.
 """
 
 import os
-from dataclasses import dataclass, field
+import json
+import math
+from dataclasses import dataclass, field, asdict
 from typing import Optional, Tuple, List, Dict
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageColor
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageColor, ImageFilter
 
 # Standard paper sizes in mm (Landscape orientation for cover spreads)
 PAPER_SIZES_MM = {
@@ -15,6 +22,7 @@ PAPER_SIZES_MM = {
     "A4": (297.0, 210.0),
     "SRA3": (450.0, 320.0),
     "A3+": (483.0, 329.0),
+    "A2": (594.0, 420.0),
 }
 
 # Standard finished book sizes in mm (Single page / Front cover dimension)
@@ -41,10 +49,17 @@ PAPER_TYPES_THICKNESS_MM = {
 }
 
 
-def calculate_spine_thickness(page_count: int, paper_type: str = "80g 双胶纸 (Offset Paper)", custom_sheet_thickness_mm: Optional[float] = None) -> float:
+def calculate_spine_thickness(
+    page_count: int,
+    paper_type: str = "80g 双胶纸 (Offset Paper)",
+    custom_sheet_thickness_mm: Optional[float] = None,
+    is_hardcover: bool = False,
+    cardboard_thickness_mm: float = 2.0
+) -> float:
     """
     Calculate book spine thickness in mm.
-    Formula: (page_count / 2) * sheet_thickness + cover_board_margin (approx 0.5mm)
+    Formula: (page_count / 2) * sheet_thickness + cover_margin
+    If Hardcover: Adds cardboard thickness (灰板纸厚度 x2).
     """
     if page_count <= 0:
         return 0.0
@@ -54,10 +69,14 @@ def calculate_spine_thickness(page_count: int, paper_type: str = "80g 双胶纸 
     else:
         sheet_thick = PAPER_TYPES_THICKNESS_MM.get(paper_type, 0.10)
 
-    sheets = (page_count + 1) // 2  # Round up to number of physical leaves/sheets
-    spine_mm = sheets * sheet_thick
-    # Add minor binding glue/margin factor (~0.5mm)
-    return round(spine_mm + 0.3, 2)
+    sheets = (page_count + 1) // 2
+    spine_mm = sheets * sheet_thick + 0.3
+
+    if is_hardcover:
+        # Hardcover spine needs extra clearance for inner cardboard thickness
+        spine_mm += cardboard_thickness_mm * 2.0
+
+    return round(spine_mm, 2)
 
 
 def mm_to_px(mm: float, dpi: int = 300) -> int:
@@ -70,6 +89,49 @@ def px_to_mm(px: int, dpi: int = 300) -> float:
     return px * 25.4 / dpi
 
 
+def draw_simple_barcode(code_str: str, width_px: int = 240, height_px: int = 80) -> Image.Image:
+    """Draw a clean Code128-like vector barcode representation with text for print shop mockups."""
+    img = Image.new("RGBA", (width_px, height_px), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Clean border
+    draw.rectangle([(0, 0), (width_px - 1, height_px - 1)], outline=(0, 0, 0, 255), width=1)
+
+    # Barcode bars
+    margin_x = 12
+    margin_y = 8
+    bar_h = height_px - 28
+
+    import hashlib
+    hash_val = hashlib.md5(code_str.encode('utf-8')).hexdigest()
+
+    curr_x = margin_x
+    idx = 0
+    while curr_x < width_px - margin_x - 4:
+        hex_char = hash_val[idx % len(hash_val)]
+        val = int(hex_char, 16)
+        bar_w = 1 if val % 2 == 0 else (2 if val < 10 else 3)
+        gap_w = 1 if val % 3 == 0 else 2
+
+        draw.rectangle([(curr_x, margin_y), (curr_x + bar_w - 1, margin_y + bar_h)], fill=(0, 0, 0, 255))
+        curr_x += bar_w + gap_w
+        idx += 1
+
+    # Draw code text at bottom
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    bbox = font.getbbox(code_str) if font else (0, 0, 60, 10)
+    tw = bbox[2] - bbox[0]
+    tx = (width_px - tw) // 2
+    ty = height_px - 18
+    draw.text((tx, ty), code_str, fill=(0, 0, 0, 255), font=font)
+
+    return img
+
+
 @dataclass
 class TextOverlay:
     text: str
@@ -78,53 +140,77 @@ class TextOverlay:
     font_size_pt: int = 24
     color: str = "#000000"
     is_vertical: bool = False
-    bg_banner: bool = False       # Draw background banner behind text for contrast
+    bg_banner: bool = False       # Draw background banner behind text
     banner_color: str = "#FFFFFF"
 
 
 @dataclass
 class ImageEditConfig:
-    brightness: float = 1.0        # 1.0 = normal, <1.0 darker, >1.0 brighter
+    brightness: float = 1.0        # 1.0 = normal
     contrast: float = 1.0          # 1.0 = normal
-    color_tint: Optional[str] = None # Tint hex overlay (e.g. #FF0000) or None
+    color_tint: Optional[str] = None
     tint_opacity: float = 0.2
     text_overlays: List[TextOverlay] = field(default_factory=list)
 
 
 @dataclass
 class CoverConfig:
+    binding_type: str = "平装胶订"      # "平装胶订" or "精装包壳"
+    hardcover_wrap_mm: float = 15.0     # 包壳折边/包边宽度 (15-20mm)
+    hardcover_groove_mm: float = 8.0    # 精装书沟槽宽度 (6-10mm)
     paper_width_mm: float = 420.0       # Sheet width (e.g. A3 landscape)
     paper_height_mm: float = 297.0      # Sheet height (e.g. A3 landscape)
     book_width_mm: float = 148.0        # Finished book width
     book_height_mm: float = 210.0       # Finished book height
     spine_width_mm: float = 10.0        # Spine thickness
-    page_count: int = 0                 # Page count for auto-spine calculation
+    page_count: int = 0
     paper_type: str = "80g 双胶纸 (Offset Paper)"
     bleed_mm: float = 3.0               # Bleed margin around cover trim
+    mirror_bleed: bool = True           # Auto-generate mirrored bleed edges if needed
     dpi: int = 300                       # Print DPI (300 standard)
     bg_color: str = "#FFFFFF"           # Sheet background color
-    spine_bg_color: Optional[str] = None # Spine fill color (None = auto/transparent)
-    spine_text: str = ""                # Spine title text
-    spine_text_color: str = "#000000"    # Spine title text color
-    spine_text_size_pt: int = 14        # Font size for spine text
-    spine_text_vertical: bool = True     # Vertical top-to-bottom text
-    draw_crop_marks: bool = True         # Draw corner crop marks
-    draw_fold_lines: bool = True         # Draw spine fold indicator lines
-    draw_info_text: bool = True          # Draw job metadata on margin
+    spine_bg_color: Optional[str] = None
+    spine_text: str = ""
+    spine_text_color: str = "#000000"
+    spine_text_size_pt: int = 14
+    spine_text_vertical: bool = True
+    draw_crop_marks: bool = True
+    draw_fold_lines: bool = True
+    draw_info_text: bool = True
     fill_mode: str = "fit"               # "fit", "fill", or "stretch"
+
+    # Barcode & ISBN settings
+    show_barcode: bool = False
+    barcode_text: str = "ISBN 978-7-12345-678-9"
 
     front_edit: ImageEditConfig = field(default_factory=ImageEditConfig)
     back_edit: ImageEditConfig = field(default_factory=ImageEditConfig)
 
     @property
+    def is_hardcover(self) -> bool:
+        return "精装" in self.binding_type
+
+    @property
     def total_spread_width_mm(self) -> float:
-        """Total spread width including front cover, spine, back cover."""
-        return self.book_width_mm * 2.0 + self.spine_width_mm
+        """Total spread width including front, back, spine, and grooves if hardcover."""
+        base = self.book_width_mm * 2.0 + self.spine_width_mm
+        if self.is_hardcover:
+            base += self.hardcover_groove_mm * 2.0
+        return base
 
     @property
     def total_spread_height_mm(self) -> float:
-        """Total spread height (same as single cover height)."""
         return self.book_height_mm
+
+    @property
+    def total_paper_needed_w_mm(self) -> float:
+        extra_bleed = self.hardcover_wrap_mm if self.is_hardcover else self.bleed_mm
+        return self.total_spread_width_mm + 2 * extra_bleed
+
+    @property
+    def total_paper_needed_h_mm(self) -> float:
+        extra_bleed = self.hardcover_wrap_mm if self.is_hardcover else self.bleed_mm
+        return self.total_spread_height_mm + 2 * extra_bleed
 
 
 class CoverEngine:
@@ -132,7 +218,6 @@ class CoverEngine:
         self.config = config
 
     def _get_font(self, size_px: int) -> ImageFont.ImageFont:
-        """Attempt to load system CJK font or fall back to default PIL font."""
         font_names = [
             "simhei.ttf", "msyh.ttc", "simsun.ttc", "Arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -147,26 +232,45 @@ class CoverEngine:
                 continue
         return ImageFont.load_default()
 
+    def check_image_dpi(self, img_path: str, target_w_px: int, target_h_px: int) -> Dict[str, any]:
+        """Check if source image has sufficient DPI resolution for printing."""
+        if not img_path or not os.path.isfile(img_path):
+            return {"valid": False, "reason": "文件不存在", "effective_dpi": 0}
+
+        try:
+            with Image.open(img_path) as img:
+                orig_w, orig_h = img.size
+                eff_dpi_w = round(orig_w / (px_to_mm(target_w_px, self.config.dpi) / 25.4))
+                eff_dpi_h = round(orig_h / (px_to_mm(target_h_px, self.config.dpi) / 25.4))
+                min_dpi = min(eff_dpi_w, eff_dpi_h)
+
+                is_low_res = min_dpi < 200
+                return {
+                    "valid": True,
+                    "orig_size": (orig_w, orig_h),
+                    "effective_dpi": min_dpi,
+                    "is_low_res": is_low_res,
+                    "warning": f"原图尺寸过于清晰度低 ({min_dpi} DPI < 300 DPI)，打印可能模糊！" if is_low_res else "清晰度充足 (≥ 200 DPI)"
+                }
+        except Exception as e:
+            return {"valid": False, "reason": str(e), "effective_dpi": 0}
+
     def _apply_image_edits_and_overlays(
         self,
         img: Image.Image,
         edit_cfg: ImageEditConfig,
         dpi: int
     ) -> Image.Image:
-        """Apply brightness, contrast, color tinting, and text overlays onto image."""
         img = img.convert("RGBA")
 
-        # 1. Brightness
         if edit_cfg.brightness != 1.0:
             enhancer = ImageEnhance.Brightness(img)
             img = enhancer.enhance(edit_cfg.brightness)
 
-        # 2. Contrast
         if edit_cfg.contrast != 1.0:
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(edit_cfg.contrast)
 
-        # 3. Color Tint Overlay
         if edit_cfg.color_tint:
             try:
                 tint_color = ImageColor.getrgb(edit_cfg.color_tint)
@@ -175,7 +279,6 @@ class CoverEngine:
             except Exception:
                 pass
 
-        # 4. Text Overlays
         if edit_cfg.text_overlays:
             draw_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(draw_layer)
@@ -247,7 +350,6 @@ class CoverEngine:
         edit_cfg: Optional[ImageEditConfig] = None,
         bg_color: Tuple[int, int, int, int] = (255, 255, 255, 255)
     ) -> Image.Image:
-        """Load an image file, resize it, and apply custom edits/overlays."""
         if not img_path or not os.path.isfile(img_path):
             blank = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
             draw = ImageDraw.Draw(blank)
@@ -276,10 +378,22 @@ class CoverEngine:
                 scale = min(scale_w, scale_h)
                 new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
                 scaled = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                resized = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
-                left = (target_w_px - new_w) // 2
-                top = (target_h_px - new_h) // 2
-                resized.paste(scaled, (left, top), scaled)
+
+                if self.config.mirror_bleed and (new_w < target_w_px or new_h < target_h_px):
+                    # Fill background with mirrored extension of scaled image
+                    resized = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
+                    left = (target_w_px - new_w) // 2
+                    top = (target_h_px - new_h) // 2
+
+                    # Mirrored extension
+                    bg_fill = scaled.resize((target_w_px, target_h_px), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(15))
+                    resized.paste(bg_fill, (0, 0))
+                    resized.paste(scaled, (left, top), scaled)
+                else:
+                    resized = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
+                    left = (target_w_px - new_w) // 2
+                    top = (target_h_px - new_h) // 2
+                    resized.paste(scaled, (left, top), scaled)
 
         if edit_cfg:
             resized = self._apply_image_edits_and_overlays(resized, edit_cfg, self.config.dpi)
@@ -293,7 +407,6 @@ class CoverEngine:
         front_img: Optional[Image.Image] = None,
         back_img: Optional[Image.Image] = None
     ) -> Image.Image:
-        """Render spine rectangle with optional background and text."""
         bg = (255, 255, 255, 255)
         if self.config.spine_bg_color:
             try:
@@ -364,23 +477,22 @@ class CoverEngine:
         front_cover_path: Optional[str] = None,
         back_cover_path: Optional[str] = None
     ) -> Image.Image:
-        """
-        Generate complete A3/A4 landscape paper sheet with Front, Spine, Back,
-        Bleed, Crop Marks, Fold Lines, and Metadata.
-        """
         cfg = self.config
         dpi = cfg.dpi
 
-        # Convert sizes to pixels
         paper_w_px = mm_to_px(cfg.paper_width_mm, dpi)
         paper_h_px = mm_to_px(cfg.paper_height_mm, dpi)
 
         book_w_px = mm_to_px(cfg.book_width_mm, dpi)
         book_h_px = mm_to_px(cfg.book_height_mm, dpi)
         spine_w_px = mm_to_px(cfg.spine_width_mm, dpi)
-        bleed_px = mm_to_px(cfg.bleed_mm, dpi)
 
-        # Create base canvas
+        extra_margin_mm = cfg.hardcover_wrap_mm if cfg.is_hardcover else cfg.bleed_mm
+        extra_margin_px = mm_to_px(extra_margin_mm, dpi)
+
+        groove_w_mm = cfg.hardcover_groove_mm if cfg.is_hardcover else 0.0
+        groove_w_px = mm_to_px(groove_w_mm, dpi)
+
         canvas = Image.new("RGBA", (paper_w_px, paper_h_px), cfg.bg_color)
 
         spread_trim_w_mm = cfg.total_spread_width_mm
@@ -405,51 +517,68 @@ class CoverEngine:
         spine_left_px = mm_to_px(spine_left_mm, dpi)
         spine_right_px = mm_to_px(spine_right_mm, dpi)
 
-        # Cover positions with bleed
-        back_w_px = book_w_px + bleed_px
-        back_h_px = book_h_px + 2 * bleed_px
+        # Image boxes including extra wrap/bleed margins
+        back_w_px = book_w_px + extra_margin_px
+        back_h_px = book_h_px + 2 * extra_margin_px
 
-        front_w_px = book_w_px + bleed_px
-        front_h_px = book_h_px + 2 * bleed_px
+        front_w_px = book_w_px + extra_margin_px
+        front_h_px = book_h_px + 2 * extra_margin_px
 
-        spine_h_px = book_h_px + 2 * bleed_px
+        spine_h_px = book_h_px + 2 * extra_margin_px
 
-        # Load cover images with edits
+        # Load cover images
         back_img = self._load_and_scale_image(back_cover_path, back_w_px, back_h_px, cfg.fill_mode, cfg.back_edit)
         front_img = self._load_and_scale_image(front_cover_path, front_w_px, front_h_px, cfg.fill_mode, cfg.front_edit)
+
+        # Overlay barcode if enabled on back cover
+        if cfg.show_barcode and cfg.barcode_text.strip():
+            barcode_w_px = mm_to_px(35.0, dpi)
+            barcode_h_px = mm_to_px(15.0, dpi)
+            bc_img = draw_simple_barcode(cfg.barcode_text, barcode_w_px, barcode_h_px)
+
+            # Bottom right position on back cover
+            bc_x = back_w_px - barcode_w_px - mm_to_px(10.0, dpi)
+            bc_y = back_h_px - barcode_h_px - mm_to_px(10.0, dpi)
+            back_img.paste(bc_img, (max(0, bc_x), max(0, bc_y)), bc_img)
 
         # Render spine
         spine_img = self._render_spine(spine_w_px, spine_h_px, front_img, back_img)
 
         # Paste onto paper canvas
-        back_pos_x = trim_left_px - bleed_px
-        back_pos_y = trim_top_px - bleed_px
+        back_pos_x = trim_left_px - extra_margin_px
+        back_pos_y = trim_top_px - extra_margin_px
         canvas.paste(back_img, (back_pos_x, back_pos_y), back_img)
 
-        front_pos_x = spine_right_px
-        front_pos_y = trim_top_px - bleed_px
+        front_pos_x = spine_right_px + groove_w_px
+        front_pos_y = trim_top_px - extra_margin_px
         canvas.paste(front_img, (front_pos_x, front_pos_y), front_img)
 
         spine_pos_x = spine_left_px
-        spine_pos_y = trim_top_px - bleed_px
+        spine_pos_y = trim_top_px - extra_margin_px
         canvas.paste(spine_img, (spine_pos_x, spine_pos_y), spine_img)
 
-        # Draw Overlay (Crop marks, Fold lines, Info text)
+        # Draw Overlay (Crop marks, Fold lines, Hardcover grooves, Info text)
         overlay = Image.new("RGBA", (paper_w_px, paper_h_px), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
+        # Fold lines & Grooves
         if cfg.draw_fold_lines:
             dash_len = mm_to_px(2.0, dpi)
             gap_len = mm_to_px(2.0, dpi)
             fold_color = (120, 120, 120, 200)
 
-            for x_px in [spine_left_px, spine_right_px]:
+            lines_to_draw = [spine_left_px, spine_right_px]
+            if cfg.is_hardcover and groove_w_px > 0:
+                lines_to_draw.extend([spine_left_px - groove_w_px, spine_right_px + groove_w_px])
+
+            for x_px in lines_to_draw:
                 curr_y = trim_top_px
                 while curr_y < trim_bottom_px:
                     end_y = min(curr_y + dash_len, trim_bottom_px)
                     draw.line([(x_px, curr_y), (x_px, end_y)], fill=fold_color, width=max(1, mm_to_px(0.2, dpi)))
                     curr_y += dash_len + gap_len
 
+        # Crop Marks (角线 / 十字切线)
         if cfg.draw_crop_marks:
             mark_len_px = mm_to_px(8.0, dpi)
             mark_offset_px = mm_to_px(2.0, dpi)
@@ -488,14 +617,15 @@ class CoverEngine:
                 x_end = trim_right_px + mark_offset_px + mark_len_px
                 draw.line([(x_start, y_px), (x_end, y_px)], fill=mark_color, width=mark_width)
 
+        # Info Text on Margin
         if cfg.draw_info_text:
             font_size_px = mm_to_px(3.0, dpi)
             font = self._get_font(font_size_px)
             info_str = (
-                f"Paper: {cfg.paper_width_mm:.0f}x{cfg.paper_height_mm:.0f}mm | "
+                f"[{cfg.binding_type}] Paper: {cfg.paper_width_mm:.0f}x{cfg.paper_height_mm:.0f}mm | "
                 f"Book: {cfg.book_width_mm:.0f}x{cfg.book_height_mm:.0f}mm | "
                 f"Spine: {cfg.spine_width_mm:.1f}mm | "
-                f"Bleed: {cfg.bleed_mm:.1f}mm | DPI: {cfg.dpi}"
+                f"Bleed/Wrap: {extra_margin_mm:.1f}mm | DPI: {cfg.dpi}"
             )
             info_x = trim_left_px
             info_y = trim_top_px - mm_to_px(12.0, dpi)
@@ -506,7 +636,6 @@ class CoverEngine:
         return final_image.convert("RGB")
 
     def export_pdf(self, output_pdf_path: str, spread_image: Image.Image):
-        """Export spread image to PDF preserving exact physical DPI and mm dimensions."""
         from reportlab.lib.units import mm
         from reportlab.pdfgen import canvas as pdf_canvas
 
