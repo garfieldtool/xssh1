@@ -1,11 +1,14 @@
 """
-Unit tests for Cover Engine layout and PDF export.
+Unit tests for Cover Engine layout, spine thickness calculation, image editing, and PDF export.
 """
 
 import os
 import unittest
 from PIL import Image
-from cover_engine import CoverConfig, CoverEngine, mm_to_px, px_to_mm
+from cover_engine import (
+    CoverConfig, CoverEngine, TextOverlay, ImageEditConfig,
+    calculate_spine_thickness, mm_to_px, px_to_mm
+)
 
 
 class TestCoverEngine(unittest.TestCase):
@@ -29,9 +32,16 @@ class TestCoverEngine(unittest.TestCase):
                 os.remove(path)
 
     def test_mm_to_px_conversion(self):
-        # 25.4 mm @ 300 DPI should be exactly 300 px
         self.assertEqual(mm_to_px(25.4, 300), 300)
         self.assertAlmostEqual(px_to_mm(300, 300), 25.4, delta=0.01)
+
+    def test_spine_thickness_calculation(self):
+        # 200P 80g offset paper -> 100 sheets * 0.10mm + 0.3mm margin = 10.3mm
+        spine = calculate_spine_thickness(200, "80g 双胶纸 (Offset Paper)")
+        self.assertEqual(spine, 10.3)
+
+        # 0P -> 0mm
+        self.assertEqual(calculate_spine_thickness(0), 0.0)
 
     def test_spread_dimensions_a3_300dpi(self):
         cfg = CoverConfig(
@@ -45,17 +55,19 @@ class TestCoverEngine(unittest.TestCase):
         engine = CoverEngine(cfg)
         spread = engine.generate_spread(self.front_img_path, self.back_img_path)
 
-        expected_w = mm_to_px(420.0, 300)  # 4961
-        expected_h = mm_to_px(297.0, 300)  # 3508
+        expected_w = mm_to_px(420.0, 300)
+        expected_h = mm_to_px(297.0, 300)
 
         self.assertEqual(spread.size, (expected_w, expected_h))
 
-    def test_spine_text_rendering(self):
+    def test_image_edits_and_text_overlay(self):
+        front_edit = ImageEditConfig(
+            brightness=1.2,
+            contrast=1.1,
+            text_overlays=[TextOverlay(text="封面主标题", font_size_pt=36, color="#FF0000", bg_banner=True)]
+        )
         cfg = CoverConfig(
-            spine_text="测试书名",
-            spine_width_mm=15.0,
-            spine_text_vertical=True,
-            spine_bg_color="#FFDD00",
+            front_edit=front_edit,
             dpi=150
         )
         engine = CoverEngine(cfg)
