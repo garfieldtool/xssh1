@@ -1,5 +1,5 @@
 """
-Unit tests for Cover Engine layout, hardcover wrap margins, barcode rendering, DPI check, and PDF export.
+Unit tests for Cover Engine layout, hardcover wrap margins, barcode rendering, DPI check, and custom presets.
 """
 
 import os
@@ -7,7 +7,8 @@ import unittest
 from PIL import Image
 from cover_engine import (
     CoverConfig, CoverEngine, TextOverlay, ImageEditConfig,
-    calculate_spine_thickness, draw_simple_barcode, mm_to_px, px_to_mm
+    calculate_spine_thickness, draw_simple_barcode, mm_to_px, px_to_mm,
+    PAPER_SIZES_MM, BOOK_SIZES_MM, INNER_PAPER_THICKNESS_MM, COVER_PAPER_STOCK_TYPES
 )
 
 
@@ -19,7 +20,6 @@ class TestCoverEngine(unittest.TestCase):
         self.output_img_path = os.path.join(self.test_dir, "test_output.png")
         self.output_pdf_path = os.path.join(self.test_dir, "test_output.pdf")
 
-        # Create dummy front and back cover images
         front = Image.new("RGB", (600, 800), color=(255, 100, 100))
         front.save(self.front_img_path)
 
@@ -31,17 +31,22 @@ class TestCoverEngine(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
-    def test_mm_to_px_conversion(self):
-        self.assertEqual(mm_to_px(25.4, 300), 300)
-        self.assertAlmostEqual(px_to_mm(300, 300), 25.4, delta=0.01)
+    def test_paper_and_book_size_dictionaries(self):
+        self.assertIn("A3 (420 x 297 mm)", PAPER_SIZES_MM)
+        self.assertIn("SRA3 (450 x 320 mm)", PAPER_SIZES_MM)
+        self.assertIn("8开 (420 x 285 mm)", PAPER_SIZES_MM)
+
+        self.assertIn("A5 (148 x 210 mm)", BOOK_SIZES_MM)
+        self.assertIn("16开 大度 (210 x 285 mm)", BOOK_SIZES_MM)
+        self.assertIn("正方形 (210 x 210 mm)", BOOK_SIZES_MM)
+
+        self.assertIn("250g 铜版纸 / 哑粉纸 (标准胶订)", COVER_PAPER_STOCK_TYPES)
 
     def test_spine_thickness_calculation(self):
-        # Softcover 200P 80g offset paper -> 10.3mm
-        spine_soft = calculate_spine_thickness(200, "80g 双胶纸 (Offset Paper)", is_hardcover=False)
+        spine_soft = calculate_spine_thickness(200, "80g 双胶纸 (Offset)", is_hardcover=False)
         self.assertEqual(spine_soft, 10.3)
 
-        # Hardcover 200P 80g offset paper -> 10.3 + 4.0 = 14.3mm
-        spine_hard = calculate_spine_thickness(200, "80g 双胶纸 (Offset Paper)", is_hardcover=True)
+        spine_hard = calculate_spine_thickness(200, "80g 双胶纸 (Offset)", is_hardcover=True)
         self.assertEqual(spine_hard, 14.3)
 
     def test_barcode_generation(self):

@@ -1,11 +1,14 @@
 """
-GUI Interface for Windows Book Cover Generator Tool (Print Shop Assistant Station Edition).
+GUI Interface for Windows Book Cover Generator Tool (Print Shop Assistant Station Edition v2.1).
 Built with Tkinter for high desktop compatibility.
 Features:
+- Professional distinction between Cover Stock (封面用纸/卡纸) and Inner Page Stock (内页用纸).
+- Extensive Paper Sheet Sizes (A3, SRA3, A3+, A4, A2, B4, B3, 8开, 4开, 16开等).
+- Extensive Finished Book Sizes (A4, A5, B5, 16开正度/大度, 32开正度/大度, 24开, 20开, 正方形等).
 - Softcover (胶订平装) & Hardcover (精装包壳) mode with wrap margins and hinge grooves.
+- Custom Template Preset Manager: Save, Load, Edit, Delete custom templates with custom names.
 - Barcode / ISBN Generator for Back Cover.
 - Image Resolution & DPI Quality Checker with alert warnings.
-- Presets JSON Save/Load template management.
 - Real-time spread preview canvas.
 """
 
@@ -18,16 +21,21 @@ from PIL import Image, ImageTk
 
 from cover_engine import (
     CoverConfig, CoverEngine, TextOverlay, ImageEditConfig,
-    PAPER_SIZES_MM, BOOK_SIZES_MM, PAPER_TYPES_THICKNESS_MM, calculate_spine_thickness
+    PAPER_SIZES_MM, BOOK_SIZES_MM, INNER_PAPER_THICKNESS_MM, COVER_PAPER_STOCK_TYPES,
+    calculate_spine_thickness
 )
+
+PRESETS_DIR = os.path.join(os.path.dirname(__file__), "user_presets")
 
 
 class BookCoverApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("A3 / A4 打印店专业书籍封面拼版与装订辅助系统 v2.0 (终极版)")
-        self.root.geometry("1240x820")
+        self.root.title("A3 / A4 打印店专业书籍封面拼版与装订辅助系统 v2.1 (旗舰版)")
+        self.root.geometry("1280x850")
         self.root.minsize(1050, 700)
+
+        os.makedirs(PRESETS_DIR, exist_ok=True)
 
         # File paths
         self.front_cover_path = tk.StringVar()
@@ -37,16 +45,20 @@ class BookCoverApp:
         self.front_dpi_info = tk.StringVar(value="等待选择图片...")
         self.back_dpi_info = tk.StringVar(value="等待选择图片...")
 
-        # Binding & Dimensions
+        # Binding & Paper Stocks
         self.binding_type_var = tk.StringVar(value="平装胶订")
+        self.cover_stock_var = tk.StringVar(value="250g 铜版纸 / 哑粉纸 (标准胶订)")
+        self.inner_paper_var = tk.StringVar(value="80g 双胶纸 (Offset)")
+
         self.hardcover_wrap_var = tk.DoubleVar(value=15.0)
         self.hardcover_groove_var = tk.DoubleVar(value=8.0)
 
-        self.paper_preset_var = tk.StringVar(value="A3")
+        # Dimensions
+        self.paper_preset_var = tk.StringVar(value="A3 (420 x 297 mm)")
         self.paper_width_var = tk.DoubleVar(value=420.0)
         self.paper_height_var = tk.DoubleVar(value=297.0)
 
-        self.book_preset_var = tk.StringVar(value="A5")
+        self.book_preset_var = tk.StringVar(value="A5 (148 x 210 mm)")
         self.book_width_var = tk.DoubleVar(value=148.0)
         self.book_height_var = tk.DoubleVar(value=210.0)
 
@@ -57,7 +69,6 @@ class BookCoverApp:
 
         # Spine Calculator
         self.page_count_var = tk.IntVar(value=200)
-        self.paper_type_var = tk.StringVar(value="80g 双胶纸 (Offset Paper)")
 
         # Spine Text Options
         self.spine_text_var = tk.StringVar(value="")
@@ -91,6 +102,9 @@ class BookCoverApp:
         self.back_text_color_var = tk.StringVar(value="#333333")
         self.back_text_size_var = tk.IntVar(value=16)
 
+        # Custom Preset Management
+        self.custom_preset_name_var = tk.StringVar(value="我的常用配置1")
+
         # Preview cache
         self.current_preview_image = None
         self.tk_preview_image = None
@@ -104,7 +118,7 @@ class BookCoverApp:
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        left_frame = ttk.Frame(main_paned, width=450)
+        left_frame = ttk.Frame(main_paned, width=470)
         main_paned.add(left_frame, weight=0)
 
         right_frame = ttk.Frame(main_paned)
@@ -118,10 +132,10 @@ class BookCoverApp:
         tab_cover_edit = ttk.Frame(notebook)
         tab_preset_manage = ttk.Frame(notebook)
 
-        notebook.add(tab_layout, text=" 1. 拼版与装订 ")
+        notebook.add(tab_layout, text=" 1. 规格与装订 ")
         notebook.add(tab_spine_calc, text=" 2. 页数厚度计算 ")
         notebook.add(tab_cover_edit, text=" 3. 图片修饰与条码 ")
-        notebook.add(tab_preset_manage, text=" 4. 预设与模板 ")
+        notebook.add(tab_preset_manage, text=" 4. 自定义预设模板 ")
 
         self._build_layout_tab(tab_layout)
         self._build_spine_calc_tab(tab_spine_calc)
@@ -149,7 +163,7 @@ class BookCoverApp:
         scrollbar.pack(side="right", fill="y")
 
         # Files & DPI Warnings
-        f_lf = ttk.LabelFrame(content, text=" 封面图片选择与清晰度检测 ", padding=10)
+        f_lf = ttk.LabelFrame(content, text=" 1. 封面图片选择与清晰度检测 ", padding=10)
         f_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Label(f_lf, text="正面封面:").grid(row=0, column=0, sticky="w", pady=2)
@@ -162,8 +176,8 @@ class BookCoverApp:
         ttk.Button(f_lf, text="浏览...", command=self._browse_back_cover).grid(row=2, column=2, pady=2)
         ttk.Label(f_lf, textvariable=self.back_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
 
-        # Binding Type Section
-        b_lf = ttk.LabelFrame(content, text=" 装订方式 (Binding Type) ", padding=10)
+        # Binding & Stock Selection
+        b_lf = ttk.LabelFrame(content, text=" 2. 装订工艺与封面纸张选择 ", padding=10)
         b_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Radiobutton(b_lf, text="平装无线胶订 (Softcover)", variable=self.binding_type_var, value="平装胶订", command=self.update_preview).pack(anchor="w", pady=2)
@@ -177,12 +191,16 @@ class BookCoverApp:
         ttk.Entry(f_hc, textvariable=self.hardcover_groove_var, width=5).pack(side=tk.LEFT, padx=2)
         ttk.Label(f_hc, text=" mm").pack(side=tk.LEFT)
 
+        ttk.Label(b_lf, text="封面用纸材质:").pack(anchor="w", pady=(5, 2))
+        cover_stock_cb = ttk.Combobox(b_lf, textvariable=self.cover_stock_var, values=COVER_PAPER_STOCK_TYPES, state="readonly", width=32)
+        cover_stock_cb.pack(anchor="w", padx=5, pady=2)
+
         # Dimensions
-        d_lf = ttk.LabelFrame(content, text=" 纸张与成书尺寸 (毫米 mm) ", padding=10)
+        d_lf = ttk.LabelFrame(content, text=" 3. 纸张与成书尺寸 (毫米 mm) ", padding=10)
         d_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Label(d_lf, text="打印纸张规格:").grid(row=0, column=0, sticky="w", pady=2)
-        paper_cb = ttk.Combobox(d_lf, textvariable=self.paper_preset_var, values=list(PAPER_SIZES_MM.keys()) + ["自定义"], state="readonly", width=12)
+        paper_cb = ttk.Combobox(d_lf, textvariable=self.paper_preset_var, values=list(PAPER_SIZES_MM.keys()) + ["自定义"], state="readonly", width=22)
         paper_cb.grid(row=0, column=1, columnspan=2, sticky="w", padx=5, pady=2)
         paper_cb.bind("<<ComboboxSelected>>", lambda e: self._on_paper_preset_change())
 
@@ -194,7 +212,7 @@ class BookCoverApp:
         ttk.Label(f_paper, text=" mm").pack(side=tk.LEFT)
 
         ttk.Label(d_lf, text="成品书籍规格:").grid(row=2, column=0, sticky="w", pady=2)
-        book_cb = ttk.Combobox(d_lf, textvariable=self.book_preset_var, values=list(BOOK_SIZES_MM.keys()) + ["自定义"], state="readonly", width=12)
+        book_cb = ttk.Combobox(d_lf, textvariable=self.book_preset_var, values=list(BOOK_SIZES_MM.keys()) + ["自定义"], state="readonly", width=22)
         book_cb.grid(row=2, column=1, columnspan=2, sticky="w", padx=5, pady=2)
         book_cb.bind("<<ComboboxSelected>>", lambda e: self._on_book_preset_change())
 
@@ -223,7 +241,7 @@ class BookCoverApp:
         ttk.Combobox(d_lf, textvariable=self.dpi_var, values=[150, 300, 600], state="readonly", width=8).grid(row=7, column=1, columnspan=2, sticky="w", padx=5, pady=2)
 
         # Marks
-        m_lf = ttk.LabelFrame(content, text=" 印前角线与参数 ", padding=10)
+        m_lf = ttk.LabelFrame(content, text=" 4. 印前角线与参数 ", padding=10)
         m_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Checkbutton(m_lf, text="绘制裁切角线 (Crop Marks)", variable=self.draw_crop_marks_var).pack(anchor="w", pady=2)
@@ -246,7 +264,7 @@ class BookCoverApp:
         ttk.Button(btn_frame, text="导出 PDF (Export PDF)", command=self.export_pdf, width=18).pack(fill=tk.X, pady=3)
 
     def _build_spine_calc_tab(self, parent):
-        calc_lf = ttk.LabelFrame(parent, text=" 根据内页页数与纸张自动计算书脊厚度 ", padding=15)
+        calc_lf = ttk.LabelFrame(parent, text=" 根据【内页材质与页数】自动推算书脊厚度 ", padding=15)
         calc_lf.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         ttk.Label(calc_lf, text="书本内页总页数 (P数):", font=("SimSun", 10, "bold")).grid(row=0, column=0, sticky="w", pady=10)
@@ -257,12 +275,12 @@ class BookCoverApp:
 
         ttk.Label(calc_lf, text="内页纸张材质与克重:", font=("SimSun", 10, "bold")).grid(row=1, column=0, sticky="w", pady=10)
         paper_type_cb = ttk.Combobox(
-            calc_lf, textvariable=self.paper_type_var,
-            values=list(PAPER_TYPES_THICKNESS_MM.keys()), state="readonly", width=28
+            calc_lf, textvariable=self.inner_paper_var,
+            values=list(INNER_PAPER_THICKNESS_MM.keys()), state="readonly", width=28
         )
         paper_type_cb.grid(row=1, column=1, sticky="w", padx=10, pady=10)
 
-        ttk.Button(calc_lf, text="计算并套用书脊厚度", command=self._apply_spine_calculation, width=22).grid(row=2, column=0, columnspan=2, pady=15)
+        ttk.Button(calc_lf, text="推算并套用书脊厚度", command=self._apply_spine_calculation, width=22).grid(row=2, column=0, columnspan=2, pady=15)
 
         # Spine Title Settings
         s_lf = ttk.LabelFrame(calc_lf, text=" 书脊文字与外观设置 ", padding=10)
@@ -351,65 +369,54 @@ class BookCoverApp:
         ttk.Button(content, text="重置修饰与文字", command=self._reset_image_edits, width=20).pack(pady=10)
 
     def _build_preset_manage_tab(self, parent):
-        p_lf = ttk.LabelFrame(parent, text=" 打印店常用参数预设管理 ", padding=15)
+        p_lf = ttk.LabelFrame(parent, text=" 打印店预设与自定义模板库 ", padding=15)
         p_lf.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        ttk.Label(p_lf, text="常用快速配置预设:", font=("SimSun", 10, "bold")).pack(anchor="w", pady=5)
+        ttk.Label(p_lf, text="系统常用快印预设:", font=("SimSun", 10, "bold")).pack(anchor="w", pady=5)
 
-        ttk.Button(p_lf, text="A5平装胶订 (A3纸拼版)", command=self._apply_preset_a5_softcover, width=28).pack(fill=tk.X, pady=4)
-        ttk.Button(p_lf, text="16开平装胶订 (A3+纸拼版)", command=self._apply_preset_16k_softcover, width=28).pack(fill=tk.X, pady=4)
-        ttk.Button(p_lf, text="A5精装硬皮包壳 (A3纸拼版)", command=self._apply_preset_a5_hardcover, width=28).pack(fill=tk.X, pady=4)
+        ttk.Button(p_lf, text="A5平装胶订 (A3纸拼版 / 250g铜版纸)", command=self._apply_preset_a5_softcover, width=32).pack(fill=tk.X, pady=3)
+        ttk.Button(p_lf, text="16开平装胶订 (A3+纸拼版 / 250g铜版纸)", command=self._apply_preset_16k_softcover, width=32).pack(fill=tk.X, pady=3)
+        ttk.Button(p_lf, text="A5精装硬皮包壳 (A3纸拼版 / 157g+2.0灰板)", command=self._apply_preset_a5_hardcover, width=32).pack(fill=tk.X, pady=3)
 
         ttk.Separator(p_lf, orient="horizontal").pack(fill=tk.X, pady=15)
 
-        ttk.Button(p_lf, text="保存当前配置模板 (.json)", command=self._save_custom_preset, width=28).pack(fill=tk.X, pady=4)
-        ttk.Button(p_lf, text="加载已有配置模板 (.json)", command=self._load_custom_preset, width=28).pack(fill=tk.X, pady=4)
+        ttk.Label(p_lf, text="自定义名称预设模板保存与管理:", font=("SimSun", 10, "bold")).pack(anchor="w", pady=5)
 
-    def _apply_preset_a5_softcover(self):
-        self.binding_type_var.set("平装胶订")
-        self.paper_preset_var.set("A3")
-        self._on_paper_preset_change()
-        self.book_preset_var.set("A5")
-        self._on_book_preset_change()
-        self.spine_width_var.set(10.0)
-        self.bleed_var.set(3.0)
-        self.update_preview()
-        messagebox.showinfo("预设加载", "已加载: A5平装胶订 (A3拼版)")
+        f_save = ttk.Frame(p_lf)
+        f_save.pack(fill=tk.X, pady=5)
+        ttk.Label(f_save, text="模板名称:").pack(side=tk.LEFT)
+        ttk.Entry(f_save, textvariable=self.custom_preset_name_var, width=18).pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_save, text="保存当前配置为模板", command=self._save_named_preset).pack(side=tk.LEFT)
 
-    def _apply_preset_16k_softcover(self):
-        self.binding_type_var.set("平装胶订")
-        self.paper_preset_var.set("A3+")
-        self._on_paper_preset_change()
-        self.book_preset_var.set("16k")
-        self._on_book_preset_change()
-        self.spine_width_var.set(12.0)
-        self.bleed_var.set(3.0)
-        self.update_preview()
-        messagebox.showinfo("预设加载", "已加载: 16开平装胶订 (A3+拼版)")
+        ttk.Label(p_lf, text="已有自定义模板列表:").pack(anchor="w", pady=(10, 2))
+        self.preset_listbox = tk.Listbox(p_lf, height=6)
+        self.preset_listbox.pack(fill=tk.BOTH, expand=True, pady=2)
 
-    def _apply_preset_a5_hardcover(self):
-        self.binding_type_var.set("精装包壳")
-        self.paper_preset_var.set("A3")
-        self._on_paper_preset_change()
-        self.book_preset_var.set("A5")
-        self._on_book_preset_change()
-        self.spine_width_var.set(14.0)
-        self.hardcover_wrap_var.set(15.0)
-        self.hardcover_groove_var.set(8.0)
-        self.update_preview()
-        messagebox.showinfo("预设加载", "已加载: A5精装硬皮包壳 (A3拼版)")
+        f_list_btn = ttk.Frame(p_lf)
+        f_list_btn.pack(fill=tk.X, pady=5)
+        ttk.Button(f_list_btn, text="加载选中的模板", command=self._load_selected_preset).pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_list_btn, text="删除选中的模板", command=self._delete_selected_preset).pack(side=tk.LEFT, padx=5)
 
-    def _save_custom_preset(self):
-        save_path = filedialog.asksaveasfilename(
-            title="保存当前配置模板",
-            defaultextension=".json",
-            filetypes=[("JSON配置文件 (*.json)", "*.json")]
-        )
-        if not save_path:
+        self._refresh_preset_listbox()
+
+    def _refresh_preset_listbox(self):
+        self.preset_listbox.delete(0, tk.END)
+        if os.path.exists(PRESETS_DIR):
+            for f in sorted(os.listdir(PRESETS_DIR)):
+                if f.endswith(".json"):
+                    self.preset_listbox.insert(tk.END, f[:-5])
+
+    def _save_named_preset(self):
+        name = self.custom_preset_name_var.get().strip()
+        if not name:
+            messagebox.showwarning("警告", "请输入有效的模板名称！")
             return
 
+        file_path = os.path.join(PRESETS_DIR, f"{name}.json")
         cfg_dict = {
             "binding_type": self.binding_type_var.get(),
+            "cover_stock": self.cover_stock_var.get(),
+            "inner_paper": self.inner_paper_var.get(),
             "paper_preset": self.paper_preset_var.get(),
             "paper_width": self.paper_width_var.get(),
             "paper_height": self.paper_height_var.get(),
@@ -422,27 +429,31 @@ class BookCoverApp:
             "show_barcode": self.show_barcode_var.get(),
             "barcode_text": self.barcode_text_var.get(),
         }
-        with open(save_path, "w", encoding="utf-8") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             json.dump(cfg_dict, f, ensure_ascii=False, indent=2)
-        messagebox.showinfo("保存成功", f"模板配置已成功保存至:\n{save_path}")
 
-    def _load_custom_preset(self):
-        load_path = filedialog.askopenfilename(
-            title="加载配置模板",
-            filetypes=[("JSON配置文件 (*.json)", "*.json")]
-        )
-        if not load_path:
+        self._refresh_preset_listbox()
+        messagebox.showinfo("成功", f"自定义模板 '{name}' 保存成功！")
+
+    def _load_selected_preset(self):
+        sel = self.preset_listbox.curselection()
+        if not sel:
+            messagebox.showwarning("提示", "请先在列表中选择要加载的模板！")
             return
 
+        name = self.preset_listbox.get(sel[0])
+        file_path = os.path.join(PRESETS_DIR, f"{name}.json")
         try:
-            with open(load_path, "r", encoding="utf-8") as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 cfg_dict = json.load(f)
 
             self.binding_type_var.set(cfg_dict.get("binding_type", "平装胶订"))
-            self.paper_preset_var.set(cfg_dict.get("paper_preset", "A3"))
+            self.cover_stock_var.set(cfg_dict.get("cover_stock", "250g 铜版纸 / 哑粉纸 (标准胶订)"))
+            self.inner_paper_var.set(cfg_dict.get("inner_paper", "80g 双胶纸 (Offset)"))
+            self.paper_preset_var.set(cfg_dict.get("paper_preset", "A3 (420 x 297 mm)"))
             self.paper_width_var.set(cfg_dict.get("paper_width", 420.0))
             self.paper_height_var.set(cfg_dict.get("paper_height", 297.0))
-            self.book_preset_var.set(cfg_dict.get("book_preset", "A5"))
+            self.book_preset_var.set(cfg_dict.get("book_preset", "A5 (148 x 210 mm)"))
             self.book_width_var.set(cfg_dict.get("book_width", 148.0))
             self.book_height_var.set(cfg_dict.get("book_height", 210.0))
             self.spine_width_var.set(cfg_dict.get("spine_width", 10.0))
@@ -451,24 +462,73 @@ class BookCoverApp:
             self.show_barcode_var.set(cfg_dict.get("show_barcode", False))
             self.barcode_text_var.set(cfg_dict.get("barcode_text", ""))
             self.update_preview()
-            messagebox.showinfo("加载成功", "配置文件模板已成功应用！")
+            messagebox.showinfo("加载成功", f"成功加载模板 '{name}'！")
         except Exception as e:
-            messagebox.showerror("加载失败", f"无法读取配置文件:\n{str(e)}")
+            messagebox.showerror("失败", f"加载模板出错:\n{str(e)}")
+
+    def _delete_selected_preset(self):
+        sel = self.preset_listbox.curselection()
+        if not sel:
+            return
+
+        name = self.preset_listbox.get(sel[0])
+        if messagebox.askyesno("确认删除", f"确定要删除自定义模板 '{name}' 吗？"):
+            file_path = os.path.join(PRESETS_DIR, f"{name}.json")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            self._refresh_preset_listbox()
+
+    def _apply_preset_a5_softcover(self):
+        self.binding_type_var.set("平装胶订")
+        self.cover_stock_var.set("250g 铜版纸 / 哑粉纸 (标准胶订)")
+        self.paper_preset_var.set("A3 (420 x 297 mm)")
+        self._on_paper_preset_change()
+        self.book_preset_var.set("A5 (148 x 210 mm)")
+        self._on_book_preset_change()
+        self.spine_width_var.set(10.0)
+        self.bleed_var.set(3.0)
+        self.update_preview()
+        messagebox.showinfo("预设加载", "已加载: A5平装胶订 (A3拼版)")
+
+    def _apply_preset_16k_softcover(self):
+        self.binding_type_var.set("平装胶订")
+        self.cover_stock_var.set("250g 铜版纸 / 哑粉纸 (标准胶订)")
+        self.paper_preset_var.set("A3+ (483 x 329 mm)")
+        self._on_paper_preset_change()
+        self.book_preset_var.set("16开 大度 (210 x 285 mm)")
+        self._on_book_preset_change()
+        self.spine_width_var.set(12.0)
+        self.bleed_var.set(3.0)
+        self.update_preview()
+        messagebox.showinfo("预设加载", "已加载: 16开平装胶订 (A3+拼版)")
+
+    def _apply_preset_a5_hardcover(self):
+        self.binding_type_var.set("精装包壳")
+        self.cover_stock_var.set("157g 铜版纸 + 2.0mm 灰板 (精装硬皮)")
+        self.paper_preset_var.set("A3 (420 x 297 mm)")
+        self._on_paper_preset_change()
+        self.book_preset_var.set("A5 (148 x 210 mm)")
+        self._on_book_preset_change()
+        self.spine_width_var.set(14.0)
+        self.hardcover_wrap_var.set(15.0)
+        self.hardcover_groove_var.set(8.0)
+        self.update_preview()
+        messagebox.showinfo("预设加载", "已加载: A5精装硬皮包壳 (A3拼版)")
 
     def _update_image_dpi_check(self):
         cfg = self._get_config()
         engine = CoverEngine(cfg)
 
-        target_w_px = engine.config.book_width_mm
-        target_h_px = engine.config.book_height_mm
+        target_w_mm = engine.config.book_width_mm
+        target_h_mm = engine.config.book_height_mm
 
-        f_res = engine.check_image_dpi(self.front_cover_path.get(), target_w_px, target_h_px)
+        f_res = engine.check_image_dpi(self.front_cover_path.get(), target_w_mm, target_h_mm)
         if f_res["valid"]:
             self.front_dpi_info.set(f"原图: {f_res['orig_size'][0]}x{f_res['orig_size'][1]} | 印刷有效: {f_res['effective_dpi']} DPI ({'⚠️偏低' if f_res['is_low_res'] else '✅高清'})")
         else:
             self.front_dpi_info.set("等待选择图片...")
 
-        b_res = engine.check_image_dpi(self.back_cover_path.get(), target_w_px, target_h_px)
+        b_res = engine.check_image_dpi(self.back_cover_path.get(), target_w_mm, target_h_mm)
         if b_res["valid"]:
             self.back_dpi_info.set(f"原图: {b_res['orig_size'][0]}x{b_res['orig_size'][1]} | 印刷有效: {b_res['effective_dpi']} DPI ({'⚠️偏低' if b_res['is_low_res'] else '✅高清'})")
         else:
@@ -511,7 +571,7 @@ class BookCoverApp:
     def _apply_spine_calculation(self):
         try:
             pages = self.page_count_var.get()
-            ptype = self.paper_type_var.get()
+            ptype = self.inner_paper_var.get()
             is_hardcover = "精装" in self.binding_type_var.get()
             spine_mm = calculate_spine_thickness(pages, ptype, is_hardcover=is_hardcover)
             self.spine_width_var.set(spine_mm)
@@ -592,6 +652,8 @@ class BookCoverApp:
 
         return CoverConfig(
             binding_type=self.binding_type_var.get(),
+            cover_stock_type=self.cover_stock_var.get(),
+            inner_paper_type=self.inner_paper_var.get(),
             hardcover_wrap_mm=self.hardcover_wrap_var.get(),
             hardcover_groove_mm=self.hardcover_groove_var.get(),
             paper_width_mm=self.paper_width_var.get(),
@@ -600,7 +662,6 @@ class BookCoverApp:
             book_height_mm=self.book_height_var.get(),
             spine_width_mm=self.spine_width_var.get(),
             page_count=self.page_count_var.get(),
-            paper_type=self.paper_type_var.get(),
             bleed_mm=self.bleed_var.get(),
             mirror_bleed=self.mirror_bleed_var.get(),
             dpi=self.dpi_var.get(),
