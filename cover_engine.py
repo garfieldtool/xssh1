@@ -1,25 +1,22 @@
 """
-Book Cover Layout Engine for Print Shops (Ultimate Edition v2.2).
+Book Cover Layout Engine for Print Shops (Ultimate Edition v2.3 - Windows 7 & Low-Spec PC Optimized).
 Generates print-ready A3/A4 spread covers with Back Cover, Spine, Front Cover, Crop Marks, and Fold Lines.
-Supports:
-- PDF File input with Page Selection (e.g. Page 1 for Front, Last Page for Back) rendered to high-DPI image.
-- Professional distinction between Cover Paper Stock (封面用纸/卡纸) and Inner Page Paper Stock (内页用纸).
-- Extensive Paper Spread Sizes (A3, SRA3, A3+, A4, A2, B4, B3, 8开, 4开, 16开, etc.).
-- Extensive Finished Book Sizes (A4, A5, B5, 16开正度/大度, 32开正度/大度, 24开, 20开, 正方形等).
-- Softcover (胶订平装) & Hardcover (精装包壳) with wrap edges (包边) & hinge grooves (沟槽).
-- Automatic Mirrored Bleed Extension (镜像延展出血) to eliminate white borders.
-- Barcode / ISBN / QR Code generation and placement.
-- Low-DPI resolution warnings.
+Optimizations for Windows 7 & Low-Spec PCs:
+- Python 3.8+ full compatibility (Windows 7 target).
+- Fast low-DPI thumbnail downsampling for UI previews (drastically reduces RAM & CPU usage).
+- Image resource caching & aggressive memory cleanup.
+- PDF Page rendering with PyMuPDF/pypdfium2 fallback.
 """
 
 import os
 import json
 import math
+import gc
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Tuple, List, Dict
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageColor, ImageFilter
 
-# PDF extraction libraries (PyMuPDF or pypdfium2)
+# PDF extraction libraries
 try:
     import fitz  # PyMuPDF
     HAS_PYMUPDF = True
@@ -33,7 +30,7 @@ except ImportError:
     HAS_PYPDFIUM = False
 
 
-# Extensive Paper Spread Sizes in mm (Landscape orientation for printing sheets)
+# Paper Spread Sizes
 PAPER_SIZES_MM = {
     "A3 (420 x 297 mm)": (420.0, 297.0),
     "SRA3 (450 x 320 mm)": (450.0, 320.0),
@@ -49,7 +46,7 @@ PAPER_SIZES_MM = {
     "16开 (285 x 210 mm)": (285.0, 210.0),
 }
 
-# Extensive Finished Book Sizes in mm (Single page / Front cover dimension)
+# Finished Book Sizes
 BOOK_SIZES_MM = {
     "A5 (148 x 210 mm)": (148.0, 210.0),
     "A4 (210 x 297 mm)": (210.0, 297.0),
@@ -66,7 +63,7 @@ BOOK_SIZES_MM = {
     "正方形 (150 x 150 mm)": (150.0, 150.0),
 }
 
-# Inner Page Paper Thickness in mm per single sheet (1 sheet = 2 pages)
+# Inner Page Paper Thickness
 INNER_PAPER_THICKNESS_MM = {
     "70g 双胶纸 (Offset)": 0.09,
     "80g 双胶纸 (Offset)": 0.10,
@@ -95,15 +92,15 @@ COVER_PAPER_STOCK_TYPES = [
 ]
 
 
-def render_pdf_page_to_image(pdf_path: str, page_num: int = 1, render_dpi: int = 300) -> Optional[Image.Image]:
-    """
-    Render a specific page from a PDF file as a high-DPI PIL RGBA Image.
-    `page_num` is 1-indexed. If page_num < 0, it counts from end (-1 = last page).
-    """
+# Global image cache for fast UI re-rendering
+_IMAGE_CACHE: Dict[str, Image.Image] = {}
+
+
+def render_pdf_page_to_image(pdf_path: str, page_num: int = 1, render_dpi: int = 150) -> Optional[Image.Image]:
+    """Render a page from a PDF file as a PIL Image."""
     if not os.path.isfile(pdf_path):
         return None
 
-    # Try PyMuPDF
     if HAS_PYMUPDF:
         try:
             doc = fitz.open(pdf_path)
@@ -125,7 +122,6 @@ def render_pdf_page_to_image(pdf_path: str, page_num: int = 1, render_dpi: int =
         except Exception:
             pass
 
-    # Try pypdfium2
     if HAS_PYPDFIUM:
         try:
             pdf = pdfium.PdfDocument(pdf_path)
@@ -240,21 +236,21 @@ class ImageEditConfig:
 
 @dataclass
 class CoverConfig:
-    binding_type: str = "平装胶订"      # "平装胶订" or "精装包壳"
+    binding_type: str = "平装胶订"
     cover_stock_type: str = "250g 铜版纸 / 哑粉纸 (标准胶订)"
     inner_paper_type: str = "80g 双胶纸 (Offset)"
-    hardcover_wrap_mm: float = 15.0     # 包壳折边/包边宽度 (15-20mm)
-    hardcover_groove_mm: float = 8.0    # 精装书沟槽宽度 (6-10mm)
-    paper_width_mm: float = 420.0       # Sheet width
-    paper_height_mm: float = 297.0      # Sheet height
-    book_width_mm: float = 148.0        # Finished book width
-    book_height_mm: float = 210.0       # Finished book height
-    spine_width_mm: float = 10.0        # Spine thickness
+    hardcover_wrap_mm: float = 15.0
+    hardcover_groove_mm: float = 8.0
+    paper_width_mm: float = 420.0
+    paper_height_mm: float = 297.0
+    book_width_mm: float = 148.0
+    book_height_mm: float = 210.0
+    spine_width_mm: float = 10.0
     page_count: int = 0
-    bleed_mm: float = 3.0               # Bleed margin around cover trim
-    mirror_bleed: bool = True           # Auto-generate mirrored bleed edges if needed
-    dpi: int = 300                       # Print DPI (300 standard)
-    bg_color: str = "#FFFFFF"           # Sheet background color
+    bleed_mm: float = 3.0
+    mirror_bleed: bool = True
+    dpi: int = 300
+    bg_color: str = "#FFFFFF"
     spine_bg_color: Optional[str] = None
     spine_text: str = ""
     spine_text_color: str = "#000000"
@@ -265,9 +261,8 @@ class CoverConfig:
     draw_info_text: bool = True
     fill_mode: str = "fit"
 
-    # PDF page selection parameters
-    front_pdf_page: int = 1             # Page for front cover (1-indexed)
-    back_pdf_page: int = -1             # Page for back cover (-1 = last page)
+    front_pdf_page: int = 1
+    back_pdf_page: int = -1
 
     show_barcode: bool = False
     barcode_text: str = "ISBN 978-7-12345-678-9"
@@ -297,11 +292,12 @@ class CoverEngine:
 
     def _get_font(self, size_px: int) -> ImageFont.ImageFont:
         font_names = [
-            "simhei.ttf", "msyh.ttc", "simsun.ttc", "Arial.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "msyh.ttc", "simhei.ttf", "simsun.ttc", "Arial.ttf",
             "C:\\Windows\\Fonts\\msyh.ttc",
             "C:\\Windows\\Fonts\\simhei.ttf",
+            "C:\\Windows\\Fonts\\simsun.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         ]
         for font_name in font_names:
             try:
@@ -316,7 +312,7 @@ class CoverEngine:
 
         try:
             if img_path.lower().endswith(".pdf"):
-                pdf_img = render_pdf_page_to_image(img_path, 1, 300)
+                pdf_img = render_pdf_page_to_image(img_path, 1, 150)
                 if pdf_img:
                     orig_w, orig_h = pdf_img.size
                 else:
@@ -444,18 +440,26 @@ class CoverEngine:
                 blank = self._apply_image_edits_and_overlays(blank, edit_cfg, self.config.dpi)
             return blank
 
-        if img_path.lower().endswith(".pdf"):
-            img = render_pdf_page_to_image(img_path, page_num=pdf_page, render_dpi=self.config.dpi)
-            if img is None:
-                blank = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
-                return blank
+        cache_key = f"{img_path}_{pdf_page}_{self.config.dpi if self.config.dpi <= 100 else 300}"
+        if cache_key in _IMAGE_CACHE:
+            img = _IMAGE_CACHE[cache_key].copy()
         else:
-            img = Image.open(img_path).convert("RGBA")
+            if img_path.lower().endswith(".pdf"):
+                img = render_pdf_page_to_image(img_path, page_num=pdf_page, render_dpi=self.config.dpi)
+                if img is None:
+                    blank = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
+                    return blank
+            else:
+                img = Image.open(img_path).convert("RGBA")
+
+            if len(_IMAGE_CACHE) > 10:
+                _IMAGE_CACHE.clear()
+            _IMAGE_CACHE[cache_key] = img.copy()
 
         orig_w, orig_h = img.size
 
         if fill_mode == "stretch":
-            resized = img.resize((target_w_px, target_h_px), Image.Resampling.LANCZOS)
+            resized = img.resize((target_w_px, target_h_px), Image.Resampling.BILINEAR)
         else:
             scale_w = target_w_px / orig_w
             scale_h = target_h_px / orig_h
@@ -463,21 +467,21 @@ class CoverEngine:
             if fill_mode == "fill":
                 scale = max(scale_w, scale_h)
                 new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
-                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
                 left = (new_w - target_w_px) // 2
                 top = (new_h - target_h_px) // 2
                 resized = resized.crop((left, top, left + target_w_px, top + target_h_px))
             else:  # "fit"
                 scale = min(scale_w, scale_h)
                 new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
-                scaled = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                scaled = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
 
                 if self.config.mirror_bleed and (new_w < target_w_px or new_h < target_h_px):
                     resized = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
                     left = (target_w_px - new_w) // 2
                     top = (target_h_px - new_h) // 2
 
-                    bg_fill = scaled.resize((target_w_px, target_h_px), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(15))
+                    bg_fill = scaled.resize((target_w_px, target_h_px), Image.Resampling.NEAREST).filter(ImageFilter.GaussianBlur(10))
                     resized.paste(bg_fill, (0, 0))
                     resized.paste(scaled, (left, top), scaled)
                 else:
@@ -718,6 +722,7 @@ class CoverEngine:
                 draw.text((info_x, info_y), info_str, fill=(80, 80, 80, 255), font=font)
 
         final_image = Image.alpha_composite(canvas, overlay)
+        gc.collect()  # Clean up memory
         return final_image.convert("RGB")
 
     def export_pdf(self, output_pdf_path: str, spread_image: Image.Image):

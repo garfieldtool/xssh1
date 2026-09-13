@@ -1,21 +1,22 @@
 """
-GUI Interface for Windows Book Cover Generator Tool (Print Shop Assistant Station Edition v2.2).
+GUI Interface for Windows Book Cover Generator Tool (Print Shop Assistant Station Edition v2.3 - Windows 7 & Low-Spec PC Edition).
 Built with Tkinter for high desktop compatibility.
-Features:
+Optimized Features:
+- Asynchronous Background Threading (`threading.Thread`) for smooth, non-blocking UI responsiveness on low-spec PCs.
+- Debounced UI Control Events using Tkinter `after()` timer.
 - PDF Input & Page Selection (Support choosing PDF files and selecting specific pages e.g. Page 1, Last Page).
 - Professional distinction between Cover Stock (封面用纸/卡纸) and Inner Page Stock (内页用纸).
-- Extensive Paper Sheet Sizes (A3, SRA3, A3+, A4, A2, B4, B3, 8开, 4开, 16开等).
-- Extensive Finished Book Sizes (A4, A5, B5, 16开正度/大度, 32开正度/大度, 24开, 20开, 正方形等).
+- Extensive Paper Sheet Sizes & Finished Book Sizes.
 - Softcover (胶订平装) & Hardcover (精装包壳) mode with wrap margins and hinge grooves.
 - Custom Template Preset Manager: Save, Load, Edit, Delete custom templates with custom names.
 - Barcode / ISBN Generator for Back Cover.
 - Image Resolution & DPI Quality Checker with alert warnings.
-- Real-time spread preview canvas.
 """
 
 import os
 import sys
 import json
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 from PIL import Image, ImageTk
@@ -32,9 +33,9 @@ PRESETS_DIR = os.path.join(os.path.dirname(__file__), "user_presets")
 class BookCoverApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("A3 / A4 打印店专业书籍封面拼版与装订辅助系统 v2.2 (旗舰版 - 支持PDF提取)")
+        self.root.title("A3 / A4 打印店专业书籍封面拼版辅助系统 v2.3 (Win7低配流畅版)")
         self.root.geometry("1280x850")
-        self.root.minsize(1050, 700)
+        self.root.minsize(1000, 680)
 
         os.makedirs(PRESETS_DIR, exist_ok=True)
 
@@ -44,7 +45,7 @@ class BookCoverApp:
 
         # PDF Page Numbers
         self.front_pdf_page_var = tk.IntVar(value=1)
-        self.back_pdf_page_var = tk.IntVar(value=-1)  # -1 = Last page
+        self.back_pdf_page_var = tk.IntVar(value=-1)
 
         # Image Quality Info
         self.front_dpi_info = tk.StringVar(value="等待选择图片/PDF文件...")
@@ -93,14 +94,14 @@ class BookCoverApp:
         self.draw_info_text_var = tk.BooleanVar(value=True)
         self.fill_mode_var = tk.StringVar(value="fit")
 
-        # Front Cover Editing & Text Overlays
+        # Front Cover Editing
         self.front_brightness_var = tk.DoubleVar(value=1.0)
         self.front_contrast_var = tk.DoubleVar(value=1.0)
         self.front_title_text_var = tk.StringVar(value="")
         self.front_title_color_var = tk.StringVar(value="#000000")
         self.front_title_size_var = tk.IntVar(value=28)
 
-        # Back Cover Editing & Text Overlays
+        # Back Cover Editing
         self.back_brightness_var = tk.DoubleVar(value=1.0)
         self.back_contrast_var = tk.DoubleVar(value=1.0)
         self.back_text_var = tk.StringVar(value="")
@@ -110,14 +111,16 @@ class BookCoverApp:
         # Custom Preset Management
         self.custom_preset_name_var = tk.StringVar(value="我的常用配置1")
 
-        # Preview cache
+        # Debouncing & Threading state
+        self._debounce_timer = None
+        self._is_rendering = False
         self.current_preview_image = None
         self.tk_preview_image = None
 
         self._build_ui()
         self._on_paper_preset_change()
         self._on_book_preset_change()
-        self.update_preview()
+        self.debounced_update_preview()
 
     def _build_ui(self):
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -148,7 +151,7 @@ class BookCoverApp:
         self._build_preset_manage_tab(tab_preset_manage)
 
         # Right Preview Canvas Area
-        preview_lf = ttk.LabelFrame(right_frame, text=" 拼版实时预览 (A3 Spread Live Preview) ", padding=10)
+        preview_lf = ttk.LabelFrame(right_frame, text=" 拼版实时预览 (A3 Spread Live Preview - 异步加速) ", padding=10)
         preview_lf.pack(fill=tk.BOTH, expand=True)
 
         self.preview_canvas = tk.Canvas(preview_lf, bg="#333333", borderwidth=0)
@@ -178,7 +181,7 @@ class BookCoverApp:
         f_fp = ttk.Frame(f_lf)
         f_fp.grid(row=1, column=0, columnspan=3, sticky="w", padx=5)
         ttk.Label(f_fp, text="如果是PDF，提取第").pack(side=tk.LEFT)
-        ttk.Spinbox(f_fp, from_=1, to=999, textvariable=self.front_pdf_page_var, width=4, command=self.update_preview).pack(side=tk.LEFT, padx=2)
+        ttk.Spinbox(f_fp, from_=1, to=999, textvariable=self.front_pdf_page_var, width=4, command=self.debounced_update_preview).pack(side=tk.LEFT, padx=2)
         ttk.Label(f_fp, text="页作为正面封面").pack(side=tk.LEFT)
 
         ttk.Label(f_lf, textvariable=self.front_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=2, column=0, columnspan=3, sticky="w", padx=5, pady=(0, 5))
@@ -190,7 +193,7 @@ class BookCoverApp:
         f_bp = ttk.Frame(f_lf)
         f_bp.grid(row=4, column=0, columnspan=3, sticky="w", padx=5)
         ttk.Label(f_bp, text="如果是PDF，提取第").pack(side=tk.LEFT)
-        ttk.Spinbox(f_bp, from_=-99, to=999, textvariable=self.back_pdf_page_var, width=4, command=self.update_preview).pack(side=tk.LEFT, padx=2)
+        ttk.Spinbox(f_bp, from_=-99, to=999, textvariable=self.back_pdf_page_var, width=4, command=self.debounced_update_preview).pack(side=tk.LEFT, padx=2)
         ttk.Label(f_bp, text="页(-1表末页)作为封底").pack(side=tk.LEFT)
 
         ttk.Label(f_lf, textvariable=self.back_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=5, column=0, columnspan=3, sticky="w", padx=5)
@@ -199,8 +202,8 @@ class BookCoverApp:
         b_lf = ttk.LabelFrame(content, text=" 2. 装订工艺与封面纸张选择 ", padding=10)
         b_lf.pack(fill=tk.X, padx=5, pady=5)
 
-        ttk.Radiobutton(b_lf, text="平装无线胶订 (Softcover)", variable=self.binding_type_var, value="平装胶订", command=self.update_preview).pack(anchor="w", pady=2)
-        ttk.Radiobutton(b_lf, text="精装硬皮包壳 (Hardcover)", variable=self.binding_type_var, value="精装包壳", command=self.update_preview).pack(anchor="w", pady=2)
+        ttk.Radiobutton(b_lf, text="平装无线胶订 (Softcover)", variable=self.binding_type_var, value="平装胶订", command=self.debounced_update_preview).pack(anchor="w", pady=2)
+        ttk.Radiobutton(b_lf, text="精装硬皮包壳 (Hardcover)", variable=self.binding_type_var, value="精装包壳", command=self.debounced_update_preview).pack(anchor="w", pady=2)
 
         f_hc = ttk.Frame(b_lf)
         f_hc.pack(anchor="w", padx=20, pady=2)
@@ -254,7 +257,7 @@ class BookCoverApp:
         ttk.Entry(f_bleed, textvariable=self.bleed_var, width=6).pack(side=tk.LEFT)
         ttk.Label(f_bleed, text=" mm").pack(side=tk.LEFT)
 
-        ttk.Checkbutton(d_lf, text="开启镜像自动出血 (无出血图防白边)", variable=self.mirror_bleed_var, command=self.update_preview).grid(row=6, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Checkbutton(d_lf, text="开启镜像自动出血 (无出血图防白边)", variable=self.mirror_bleed_var, command=self.debounced_update_preview).grid(row=6, column=0, columnspan=3, sticky="w", pady=2)
 
         ttk.Label(d_lf, text="打印分辨率 (DPI):").grid(row=7, column=0, sticky="w", pady=2)
         ttk.Combobox(d_lf, textvariable=self.dpi_var, values=[150, 300, 600], state="readonly", width=8).grid(row=7, column=1, columnspan=2, sticky="w", padx=5, pady=2)
@@ -270,15 +273,15 @@ class BookCoverApp:
         ttk.Label(m_lf, text="图片填充方式:").pack(anchor="w", pady=(5, 2))
         f_mode = ttk.Frame(m_lf)
         f_mode.pack(anchor="w")
-        ttk.Radiobutton(f_mode, text="保持比例 (Fit)", variable=self.fill_mode_var, value="fit", command=self.update_preview).pack(side=tk.LEFT)
-        ttk.Radiobutton(f_mode, text="裁剪填充 (Fill)", variable=self.fill_mode_var, value="fill", command=self.update_preview).pack(side=tk.LEFT)
-        ttk.Radiobutton(f_mode, text="拉伸 (Stretch)", variable=self.fill_mode_var, value="stretch", command=self.update_preview).pack(side=tk.LEFT)
+        ttk.Radiobutton(f_mode, text="保持比例 (Fit)", variable=self.fill_mode_var, value="fit", command=self.debounced_update_preview).pack(side=tk.LEFT)
+        ttk.Radiobutton(f_mode, text="裁剪填充 (Fill)", variable=self.fill_mode_var, value="fill", command=self.debounced_update_preview).pack(side=tk.LEFT)
+        ttk.Radiobutton(f_mode, text="拉伸 (Stretch)", variable=self.fill_mode_var, value="stretch", command=self.debounced_update_preview).pack(side=tk.LEFT)
 
         # Action Buttons
         btn_frame = ttk.Frame(content, padding=10)
         btn_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        ttk.Button(btn_frame, text="刷新预览 (Refresh)", command=self.update_preview, width=18).pack(fill=tk.X, pady=3)
+        ttk.Button(btn_frame, text="刷新预览 (Refresh)", command=self.debounced_update_preview, width=18).pack(fill=tk.X, pady=3)
         ttk.Button(btn_frame, text="导出高清图片 (Export Image)", command=self.export_image, width=18).pack(fill=tk.X, pady=3)
         ttk.Button(btn_frame, text="导出 PDF (Export PDF)", command=self.export_pdf, width=18).pack(fill=tk.X, pady=3)
 
@@ -311,8 +314,8 @@ class BookCoverApp:
         ttk.Label(s_lf, text="文字方向:").grid(row=1, column=0, sticky="w", pady=2)
         f_orient = ttk.Frame(s_lf)
         f_orient.grid(row=1, column=1, columnspan=2, sticky="w", padx=5, pady=2)
-        ttk.Radiobutton(f_orient, text="竖排 (直书)", variable=self.spine_text_vertical_var, value=True, command=self.update_preview).pack(side=tk.LEFT)
-        ttk.Radiobutton(f_orient, text="横排 (旋转)", variable=self.spine_text_vertical_var, value=False, command=self.update_preview).pack(side=tk.LEFT)
+        ttk.Radiobutton(f_orient, text="竖排 (直书)", variable=self.spine_text_vertical_var, value=True, command=self.debounced_update_preview).pack(side=tk.LEFT)
+        ttk.Radiobutton(f_orient, text="横排 (旋转)", variable=self.spine_text_vertical_var, value=False, command=self.debounced_update_preview).pack(side=tk.LEFT)
 
         ttk.Label(s_lf, text="字号大小 (pt):").grid(row=2, column=0, sticky="w", pady=2)
         ttk.Spinbox(s_lf, from_=8, to=72, textvariable=self.spine_text_size_var, width=6).grid(row=2, column=1, sticky="w", padx=5, pady=2)
@@ -320,7 +323,7 @@ class BookCoverApp:
         ttk.Label(s_lf, text="文字颜色:").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Button(s_lf, text="选择颜色", command=self._choose_spine_text_color).grid(row=3, column=1, sticky="w", padx=5, pady=2)
 
-        ttk.Checkbutton(s_lf, text="自定义书脊底色", variable=self.use_custom_spine_bg_var, command=self.update_preview).grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(s_lf, text="自定义书脊底色", variable=self.use_custom_spine_bg_var, command=self.debounced_update_preview).grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Button(s_lf, text="选择底色", command=self._choose_spine_bg_color).grid(row=4, column=2, sticky="w", pady=2)
 
     def _build_cover_edit_tab(self, parent):
@@ -339,7 +342,7 @@ class BookCoverApp:
         bc_lf = ttk.LabelFrame(content, text=" 封底条形码 / ISBN 自动生成 ", padding=10)
         bc_lf.pack(fill=tk.X, padx=5, pady=5)
 
-        ttk.Checkbutton(bc_lf, text="在封底右下角生成条形码/ISBN", variable=self.show_barcode_var, command=self.update_preview).pack(anchor="w", pady=2)
+        ttk.Checkbutton(bc_lf, text="在封底右下角生成条形码/ISBN", variable=self.show_barcode_var, command=self.debounced_update_preview).pack(anchor="w", pady=2)
         ttk.Label(bc_lf, text="ISBN/条码编号:").pack(anchor="w", pady=2)
         ttk.Entry(bc_lf, textvariable=self.barcode_text_var, width=25).pack(anchor="w", pady=2)
 
@@ -348,11 +351,11 @@ class BookCoverApp:
         fe_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Label(fe_lf, text="亮度 (Brightness):").grid(row=0, column=0, sticky="w", pady=2)
-        s_fb = ttk.Scale(fe_lf, from_=0.5, to=1.5, variable=self.front_brightness_var, command=lambda e: self.update_preview())
+        s_fb = ttk.Scale(fe_lf, from_=0.5, to=1.5, variable=self.front_brightness_var, command=lambda e: self.debounced_update_preview())
         s_fb.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
 
         ttk.Label(fe_lf, text="对比度 (Contrast):").grid(row=1, column=0, sticky="w", pady=2)
-        s_fc = ttk.Scale(fe_lf, from_=0.5, to=1.5, variable=self.front_contrast_var, command=lambda e: self.update_preview())
+        s_fc = ttk.Scale(fe_lf, from_=0.5, to=1.5, variable=self.front_contrast_var, command=lambda e: self.debounced_update_preview())
         s_fc.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
 
         ttk.Label(fe_lf, text="封面叠加标题文字:").grid(row=2, column=0, sticky="w", pady=2)
@@ -369,11 +372,11 @@ class BookCoverApp:
         be_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Label(be_lf, text="亮度 (Brightness):").grid(row=0, column=0, sticky="w", pady=2)
-        s_bb = ttk.Scale(be_lf, from_=0.5, to=1.5, variable=self.back_brightness_var, command=lambda e: self.update_preview())
+        s_bb = ttk.Scale(be_lf, from_=0.5, to=1.5, variable=self.back_brightness_var, command=lambda e: self.debounced_update_preview())
         s_bb.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
 
         ttk.Label(be_lf, text="对比度 (Contrast):").grid(row=1, column=0, sticky="w", pady=2)
-        s_bc = ttk.Scale(be_lf, from_=0.5, to=1.5, variable=self.back_contrast_var, command=lambda e: self.update_preview())
+        s_bc = ttk.Scale(be_lf, from_=0.5, to=1.5, variable=self.back_contrast_var, command=lambda e: self.debounced_update_preview())
         s_bc.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
 
         ttk.Label(be_lf, text="封底叠加文字:").grid(row=2, column=0, sticky="w", pady=2)
@@ -480,7 +483,7 @@ class BookCoverApp:
             self.dpi_var.set(cfg_dict.get("dpi", 300))
             self.show_barcode_var.set(cfg_dict.get("show_barcode", False))
             self.barcode_text_var.set(cfg_dict.get("barcode_text", ""))
-            self.update_preview()
+            self.debounced_update_preview()
             messagebox.showinfo("加载成功", f"成功加载模板 '{name}'！")
         except Exception as e:
             messagebox.showerror("失败", f"加载模板出错:\n{str(e)}")
@@ -506,7 +509,7 @@ class BookCoverApp:
         self._on_book_preset_change()
         self.spine_width_var.set(10.0)
         self.bleed_var.set(3.0)
-        self.update_preview()
+        self.debounced_update_preview()
         messagebox.showinfo("预设加载", "已加载: A5平装胶订 (A3拼版)")
 
     def _apply_preset_16k_softcover(self):
@@ -518,7 +521,7 @@ class BookCoverApp:
         self._on_book_preset_change()
         self.spine_width_var.set(12.0)
         self.bleed_var.set(3.0)
-        self.update_preview()
+        self.debounced_update_preview()
         messagebox.showinfo("预设加载", "已加载: 16开平装胶订 (A3+拼版)")
 
     def _apply_preset_a5_hardcover(self):
@@ -531,7 +534,7 @@ class BookCoverApp:
         self.spine_width_var.set(14.0)
         self.hardcover_wrap_var.set(15.0)
         self.hardcover_groove_var.set(8.0)
-        self.update_preview()
+        self.debounced_update_preview()
         messagebox.showinfo("预设加载", "已加载: A5精装硬皮包壳 (A3拼版)")
 
     def _update_image_dpi_check(self):
@@ -561,7 +564,7 @@ class BookCoverApp:
         if path:
             self.front_cover_path.set(path)
             self._update_image_dpi_check()
-            self.update_preview()
+            self.debounced_update_preview()
 
     def _browse_back_cover(self):
         path = filedialog.askopenfilename(
@@ -571,7 +574,7 @@ class BookCoverApp:
         if path:
             self.back_cover_path.set(path)
             self._update_image_dpi_check()
-            self.update_preview()
+            self.debounced_update_preview()
 
     def _on_paper_preset_change(self):
         preset = self.paper_preset_var.get()
@@ -579,6 +582,7 @@ class BookCoverApp:
             w, h = PAPER_SIZES_MM[preset]
             self.paper_width_var.set(w)
             self.paper_height_var.set(h)
+        self.debounced_update_preview()
 
     def _on_book_preset_change(self):
         preset = self.book_preset_var.get()
@@ -586,6 +590,7 @@ class BookCoverApp:
             w, h = BOOK_SIZES_MM[preset]
             self.book_width_var.set(w)
             self.book_height_var.set(h)
+        self.debounced_update_preview()
 
     def _apply_spine_calculation(self):
         try:
@@ -595,7 +600,7 @@ class BookCoverApp:
             spine_mm = calculate_spine_thickness(pages, ptype, is_hardcover=is_hardcover)
             self.spine_width_var.set(spine_mm)
             messagebox.showinfo("计算完成", f"根据 {pages}P {ptype} [{'精装' if is_hardcover else '平装'}] 计算得出:\n推算书脊厚度约为: {spine_mm} mm\n已自动更新至拼版参数中。")
-            self.update_preview()
+            self.debounced_update_preview()
         except Exception as e:
             messagebox.showerror("计算失败", f"计算书脊厚度时出错: {str(e)}")
 
@@ -603,26 +608,26 @@ class BookCoverApp:
         color = colorchooser.askcolor(title="选择书脊文字颜色", color=self.spine_text_color_var.get())
         if color[1]:
             self.spine_text_color_var.set(color[1])
-            self.update_preview()
+            self.debounced_update_preview()
 
     def _choose_spine_bg_color(self):
         color = colorchooser.askcolor(title="选择书脊背景颜色", color=self.spine_bg_color_var.get())
         if color[1]:
             self.spine_bg_color_var.set(color[1])
             self.use_custom_spine_bg_var.set(True)
-            self.update_preview()
+            self.debounced_update_preview()
 
     def _choose_front_title_color(self):
         color = colorchooser.askcolor(title="选择正面标题文字颜色", color=self.front_title_color_var.get())
         if color[1]:
             self.front_title_color_var.set(color[1])
-            self.update_preview()
+            self.debounced_update_preview()
 
     def _choose_back_text_color(self):
         color = colorchooser.askcolor(title="选择封底文字颜色", color=self.back_text_color_var.get())
         if color[1]:
             self.back_text_color_var.set(color[1])
-            self.update_preview()
+            self.debounced_update_preview()
 
     def _reset_image_edits(self):
         self.front_brightness_var.set(1.0)
@@ -632,7 +637,66 @@ class BookCoverApp:
         self.back_contrast_var.set(1.0)
         self.back_text_var.set("")
         self.show_barcode_var.set(False)
-        self.update_preview()
+        self.debounced_update_preview()
+
+    def debounced_update_preview(self, delay_ms: int = 150):
+        """Debounced preview trigger to prevent freezing during rapid slider/textbox changes."""
+        if self._debounce_timer is not None:
+            self.root.after_cancel(self._debounce_timer)
+        self._debounce_timer = self.root.after(delay_ms, self._async_update_preview)
+
+    def _async_update_preview(self):
+        """Asynchronous background rendering thread so UI stays completely responsive on low-spec PCs."""
+        if self._is_rendering:
+            return
+        self._is_rendering = True
+
+        cfg = self._get_config()
+        front_path = self.front_cover_path.get()
+        back_path = self.back_cover_path.get()
+
+        def background_task():
+            try:
+                # Generate preview at 100 DPI for speed and low RAM usage
+                preview_cfg = CoverConfig(**{**cfg.__dict__, "dpi": 100})
+                engine = CoverEngine(preview_cfg)
+                spread_img = engine.generate_spread(front_path, back_path)
+
+                def update_ui():
+                    self.current_preview_image = spread_img
+                    self._render_preview_on_canvas()
+                    self._is_rendering = False
+
+                self.root.after(0, update_ui)
+            except Exception as e:
+                self._is_rendering = False
+
+        threading.Thread(target=background_task, daemon=True).start()
+
+    def _render_preview_on_canvas(self):
+        if self.current_preview_image is None:
+            return
+
+        cw = self.preview_canvas.winfo_width()
+        ch = self.preview_canvas.winfo_height()
+
+        if cw <= 10 or ch <= 10:
+            return
+
+        img = self.current_preview_image
+        iw, ih = img.size
+
+        scale = min((cw - 20) / iw, (ch - 20) / ih)
+        nw = max(1, int(iw * scale))
+        nh = max(1, int(ih * scale))
+
+        resized = img.resize((nw, nh), Image.Resampling.BILINEAR)
+        self.tk_preview_image = ImageTk.PhotoImage(resized)
+
+        self.preview_canvas.delete("all")
+        cx = cw // 2
+        cy = ch // 2
+        self.preview_canvas.create_image(cx, cy, image=self.tk_preview_image)
 
     def _get_config(self) -> CoverConfig:
         front_overlays = []
@@ -700,44 +764,6 @@ class BookCoverApp:
             front_edit=front_edit,
             back_edit=back_edit
         )
-
-    def update_preview(self):
-        try:
-            cfg = self._get_config()
-            preview_cfg = CoverConfig(**{**cfg.__dict__, "dpi": 100})
-            engine = CoverEngine(preview_cfg)
-            self.current_preview_image = engine.generate_spread(
-                self.front_cover_path.get(),
-                self.back_cover_path.get()
-            )
-            self._render_preview_on_canvas()
-        except Exception as e:
-            messagebox.showerror("计算错误", f"生成预览时出错: {str(e)}")
-
-    def _render_preview_on_canvas(self):
-        if self.current_preview_image is None:
-            return
-
-        cw = self.preview_canvas.winfo_width()
-        ch = self.preview_canvas.winfo_height()
-
-        if cw <= 10 or ch <= 10:
-            return
-
-        img = self.current_preview_image
-        iw, ih = img.size
-
-        scale = min((cw - 20) / iw, (ch - 20) / ih)
-        nw = max(1, int(iw * scale))
-        nh = max(1, int(ih * scale))
-
-        resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
-        self.tk_preview_image = ImageTk.PhotoImage(resized)
-
-        self.preview_canvas.delete("all")
-        cx = cw // 2
-        cy = ch // 2
-        self.preview_canvas.create_image(cx, cy, image=self.tk_preview_image)
 
     def export_image(self):
         try:

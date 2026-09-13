@@ -1,5 +1,6 @@
 """
 Python script to package the Book Cover Generator tool into a standalone Windows executable (.exe).
+Compatible with Windows 7 / Windows 10 / Windows 11 (Supports Python 3.8.x on Windows 7).
 Uses PyInstaller.
 """
 
@@ -9,7 +10,7 @@ import sys
 
 
 def build():
-    print("Building Windows Executable using PyInstaller...")
+    print("Building Windows Executable using PyInstaller (Windows 7/10/11 Compatible)...")
     cmd = [
         sys.executable,
         "-m",
