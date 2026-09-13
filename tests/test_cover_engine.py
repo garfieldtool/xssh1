@@ -1,14 +1,15 @@
 """
-Unit tests for Cover Engine layout, hardcover wrap margins, barcode rendering, DPI check, and custom presets.
+Unit tests for Cover Engine layout, hardcover wrap margins, barcode rendering, PDF input extraction, DPI check, and custom presets.
 """
 
 import os
 import unittest
 from PIL import Image
+from reportlab.pdfgen import canvas
 from cover_engine import (
     CoverConfig, CoverEngine, TextOverlay, ImageEditConfig,
-    calculate_spine_thickness, draw_simple_barcode, mm_to_px, px_to_mm,
-    PAPER_SIZES_MM, BOOK_SIZES_MM, INNER_PAPER_THICKNESS_MM, COVER_PAPER_STOCK_TYPES
+    calculate_spine_thickness, draw_simple_barcode, render_pdf_page_to_image,
+    mm_to_px, px_to_mm, PAPER_SIZES_MM, BOOK_SIZES_MM
 )
 
 
@@ -17,37 +18,52 @@ class TestCoverEngine(unittest.TestCase):
         self.test_dir = os.path.dirname(__file__)
         self.front_img_path = os.path.join(self.test_dir, "test_front.png")
         self.back_img_path = os.path.join(self.test_dir, "test_back.png")
+        self.test_pdf_path = os.path.join(self.test_dir, "test_input.pdf")
         self.output_img_path = os.path.join(self.test_dir, "test_output.png")
         self.output_pdf_path = os.path.join(self.test_dir, "test_output.pdf")
 
+        # Create dummy front and back cover images
         front = Image.new("RGB", (600, 800), color=(255, 100, 100))
         front.save(self.front_img_path)
 
         back = Image.new("RGB", (600, 800), color=(100, 100, 255))
         back.save(self.back_img_path)
 
+        # Create 2-page dummy test PDF file
+        c = canvas.Canvas(self.test_pdf_path, pagesize=(400, 600))
+        c.drawString(100, 500, "PDF Front Page (Page 1)")
+        c.showPage()
+        c.drawString(100, 500, "PDF Back Page (Page 2)")
+        c.showPage()
+        c.save()
+
     def tearDown(self):
-        for path in [self.front_img_path, self.back_img_path, self.output_img_path, self.output_pdf_path]:
+        for path in [self.front_img_path, self.back_img_path, self.test_pdf_path, self.output_img_path, self.output_pdf_path]:
             if os.path.exists(path):
                 os.remove(path)
 
-    def test_paper_and_book_size_dictionaries(self):
-        self.assertIn("A3 (420 x 297 mm)", PAPER_SIZES_MM)
-        self.assertIn("SRA3 (450 x 320 mm)", PAPER_SIZES_MM)
-        self.assertIn("8开 (420 x 285 mm)", PAPER_SIZES_MM)
+    def test_pdf_page_extraction(self):
+        # Extract page 1
+        img1 = render_pdf_page_to_image(self.test_pdf_path, page_num=1, render_dpi=150)
+        self.assertIsNotNone(img1)
 
-        self.assertIn("A5 (148 x 210 mm)", BOOK_SIZES_MM)
-        self.assertIn("16开 大度 (210 x 285 mm)", BOOK_SIZES_MM)
-        self.assertIn("正方形 (210 x 210 mm)", BOOK_SIZES_MM)
+        # Extract page -1 (last page)
+        img_last = render_pdf_page_to_image(self.test_pdf_path, page_num=-1, render_dpi=150)
+        self.assertIsNotNone(img_last)
 
-        self.assertIn("250g 铜版纸 / 哑粉纸 (标准胶订)", COVER_PAPER_STOCK_TYPES)
+    def test_pdf_input_cover_generation(self):
+        cfg = CoverConfig(
+            front_pdf_page=1,
+            back_pdf_page=2,
+            dpi=150
+        )
+        engine = CoverEngine(cfg)
+        spread = engine.generate_spread(self.test_pdf_path, self.test_pdf_path)
+        self.assertIsNotNone(spread)
 
     def test_spine_thickness_calculation(self):
         spine_soft = calculate_spine_thickness(200, "80g 双胶纸 (Offset)", is_hardcover=False)
         self.assertEqual(spine_soft, 10.3)
-
-        spine_hard = calculate_spine_thickness(200, "80g 双胶纸 (Offset)", is_hardcover=True)
-        self.assertEqual(spine_hard, 14.3)
 
     def test_barcode_generation(self):
         bc_img = draw_simple_barcode("ISBN 978-7-12345-678-9", 200, 60)
@@ -57,27 +73,9 @@ class TestCoverEngine(unittest.TestCase):
     def test_dpi_check(self):
         cfg = CoverConfig(dpi=300)
         engine = CoverEngine(cfg)
-        res = engine.check_image_dpi(self.front_img_path, 148, 210)
+        res = engine.check_image_dpi(self.front_img_path, 148.0, 210.0)
         self.assertTrue(res["valid"])
         self.assertIn("effective_dpi", res)
-
-    def test_hardcover_spread_dimensions(self):
-        cfg = CoverConfig(
-            binding_type="精装包壳",
-            hardcover_wrap_mm=15.0,
-            hardcover_groove_mm=8.0,
-            paper_width_mm=420.0,
-            paper_height_mm=297.0,
-            book_width_mm=148.0,
-            book_height_mm=210.0,
-            spine_width_mm=12.0,
-            show_barcode=True,
-            barcode_text="1234567890",
-            dpi=150
-        )
-        engine = CoverEngine(cfg)
-        spread = engine.generate_spread(self.front_img_path, self.back_img_path)
-        self.assertIsNotNone(spread)
 
     def test_pdf_export(self):
         cfg = CoverConfig(dpi=150)

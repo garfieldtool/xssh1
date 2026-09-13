@@ -1,7 +1,8 @@
 """
-GUI Interface for Windows Book Cover Generator Tool (Print Shop Assistant Station Edition v2.1).
+GUI Interface for Windows Book Cover Generator Tool (Print Shop Assistant Station Edition v2.2).
 Built with Tkinter for high desktop compatibility.
 Features:
+- PDF Input & Page Selection (Support choosing PDF files and selecting specific pages e.g. Page 1, Last Page).
 - Professional distinction between Cover Stock (封面用纸/卡纸) and Inner Page Stock (内页用纸).
 - Extensive Paper Sheet Sizes (A3, SRA3, A3+, A4, A2, B4, B3, 8开, 4开, 16开等).
 - Extensive Finished Book Sizes (A4, A5, B5, 16开正度/大度, 32开正度/大度, 24开, 20开, 正方形等).
@@ -31,19 +32,23 @@ PRESETS_DIR = os.path.join(os.path.dirname(__file__), "user_presets")
 class BookCoverApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("A3 / A4 打印店专业书籍封面拼版与装订辅助系统 v2.1 (旗舰版)")
+        self.root.title("A3 / A4 打印店专业书籍封面拼版与装订辅助系统 v2.2 (旗舰版 - 支持PDF提取)")
         self.root.geometry("1280x850")
         self.root.minsize(1050, 700)
 
         os.makedirs(PRESETS_DIR, exist_ok=True)
 
-        # File paths
+        # File paths (Images or PDF)
         self.front_cover_path = tk.StringVar()
         self.back_cover_path = tk.StringVar()
 
+        # PDF Page Numbers
+        self.front_pdf_page_var = tk.IntVar(value=1)
+        self.back_pdf_page_var = tk.IntVar(value=-1)  # -1 = Last page
+
         # Image Quality Info
-        self.front_dpi_info = tk.StringVar(value="等待选择图片...")
-        self.back_dpi_info = tk.StringVar(value="等待选择图片...")
+        self.front_dpi_info = tk.StringVar(value="等待选择图片/PDF文件...")
+        self.back_dpi_info = tk.StringVar(value="等待选择图片/PDF文件...")
 
         # Binding & Paper Stocks
         self.binding_type_var = tk.StringVar(value="平装胶订")
@@ -162,19 +167,33 @@ class BookCoverApp:
         scroll_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Files & DPI Warnings
-        f_lf = ttk.LabelFrame(content, text=" 1. 封面图片选择与清晰度检测 ", padding=10)
+        # Files & DPI Warnings & PDF Page Selection
+        f_lf = ttk.LabelFrame(content, text=" 1. 封面图片/PDF文件选择与提取 ", padding=10)
         f_lf.pack(fill=tk.X, padx=5, pady=5)
 
         ttk.Label(f_lf, text="正面封面:").grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(f_lf, textvariable=self.front_cover_path, width=22).grid(row=0, column=1, padx=5, pady=2)
+        ttk.Entry(f_lf, textvariable=self.front_cover_path, width=20).grid(row=0, column=1, padx=2, pady=2)
         ttk.Button(f_lf, text="浏览...", command=self._browse_front_cover).grid(row=0, column=2, pady=2)
-        ttk.Label(f_lf, textvariable=self.front_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=1, column=0, columnspan=3, sticky="w", padx=5)
 
-        ttk.Label(f_lf, text="背面封面:").grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(f_lf, textvariable=self.back_cover_path, width=22).grid(row=2, column=1, padx=5, pady=2)
-        ttk.Button(f_lf, text="浏览...", command=self._browse_back_cover).grid(row=2, column=2, pady=2)
-        ttk.Label(f_lf, textvariable=self.back_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
+        f_fp = ttk.Frame(f_lf)
+        f_fp.grid(row=1, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(f_fp, text="如果是PDF，提取第").pack(side=tk.LEFT)
+        ttk.Spinbox(f_fp, from_=1, to=999, textvariable=self.front_pdf_page_var, width=4, command=self.update_preview).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_fp, text="页作为正面封面").pack(side=tk.LEFT)
+
+        ttk.Label(f_lf, textvariable=self.front_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=2, column=0, columnspan=3, sticky="w", padx=5, pady=(0, 5))
+
+        ttk.Label(f_lf, text="背面封面:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(f_lf, textvariable=self.back_cover_path, width=20).grid(row=3, column=1, padx=2, pady=2)
+        ttk.Button(f_lf, text="浏览...", command=self._browse_back_cover).grid(row=3, column=2, pady=2)
+
+        f_bp = ttk.Frame(f_lf)
+        f_bp.grid(row=4, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(f_bp, text="如果是PDF，提取第").pack(side=tk.LEFT)
+        ttk.Spinbox(f_bp, from_=-99, to=999, textvariable=self.back_pdf_page_var, width=4, command=self.update_preview).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_bp, text="页(-1表末页)作为封底").pack(side=tk.LEFT)
+
+        ttk.Label(f_lf, textvariable=self.back_dpi_info, foreground="#888888", font=("SimSun", 8)).grid(row=5, column=0, columnspan=3, sticky="w", padx=5)
 
         # Binding & Stock Selection
         b_lf = ttk.LabelFrame(content, text=" 2. 装订工艺与封面纸张选择 ", padding=10)
@@ -524,20 +543,20 @@ class BookCoverApp:
 
         f_res = engine.check_image_dpi(self.front_cover_path.get(), target_w_mm, target_h_mm)
         if f_res["valid"]:
-            self.front_dpi_info.set(f"原图: {f_res['orig_size'][0]}x{f_res['orig_size'][1]} | 印刷有效: {f_res['effective_dpi']} DPI ({'⚠️偏低' if f_res['is_low_res'] else '✅高清'})")
+            self.front_dpi_info.set(f"原文件: {f_res['orig_size'][0]}x{f_res['orig_size'][1]} | 印刷有效: {f_res['effective_dpi']} DPI ({'⚠️偏低' if f_res['is_low_res'] else '✅高清'})")
         else:
-            self.front_dpi_info.set("等待选择图片...")
+            self.front_dpi_info.set("等待选择图片/PDF文件...")
 
         b_res = engine.check_image_dpi(self.back_cover_path.get(), target_w_mm, target_h_mm)
         if b_res["valid"]:
-            self.back_dpi_info.set(f"原图: {b_res['orig_size'][0]}x{b_res['orig_size'][1]} | 印刷有效: {b_res['effective_dpi']} DPI ({'⚠️偏低' if b_res['is_low_res'] else '✅高清'})")
+            self.back_dpi_info.set(f"原文件: {b_res['orig_size'][0]}x{b_res['orig_size'][1]} | 印刷有效: {b_res['effective_dpi']} DPI ({'⚠️偏低' if b_res['is_low_res'] else '✅高清'})")
         else:
-            self.back_dpi_info.set("等待选择图片...")
+            self.back_dpi_info.set("等待选择图片/PDF文件...")
 
     def _browse_front_cover(self):
         path = filedialog.askopenfilename(
-            title="选择正面封面图片",
-            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp *.tiff"), ("所有文件", "*.*")]
+            title="选择正面封面图片或PDF文件",
+            filetypes=[("支持的文件", "*.png *.jpg *.jpeg *.pdf *.bmp *.webp *.tiff"), ("PDF文件", "*.pdf"), ("所有文件", "*.*")]
         )
         if path:
             self.front_cover_path.set(path)
@@ -546,8 +565,8 @@ class BookCoverApp:
 
     def _browse_back_cover(self):
         path = filedialog.askopenfilename(
-            title="选择背面封面图片",
-            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp *.tiff"), ("所有文件", "*.*")]
+            title="选择背面封面图片或PDF文件",
+            filetypes=[("支持的文件", "*.png *.jpg *.jpeg *.pdf *.bmp *.webp *.tiff"), ("PDF文件", "*.pdf"), ("所有文件", "*.*")]
         )
         if path:
             self.back_cover_path.set(path)
@@ -670,6 +689,8 @@ class BookCoverApp:
             spine_text_size_pt=self.spine_text_size_var.get(),
             spine_text_vertical=self.spine_text_vertical_var.get(),
             spine_bg_color=self.spine_bg_color_var.get() if self.use_custom_spine_bg_var.get() else None,
+            front_pdf_page=self.front_pdf_page_var.get(),
+            back_pdf_page=self.back_pdf_page_var.get(),
             show_barcode=self.show_barcode_var.get(),
             barcode_text=self.barcode_text_var.get(),
             draw_crop_marks=self.draw_crop_marks_var.get(),

@@ -1,10 +1,11 @@
 """
-Book Cover Layout Engine for Print Shops (Ultimate Edition v2.1).
+Book Cover Layout Engine for Print Shops (Ultimate Edition v2.2).
 Generates print-ready A3/A4 spread covers with Back Cover, Spine, Front Cover, Crop Marks, and Fold Lines.
 Supports:
+- PDF File input with Page Selection (e.g. Page 1 for Front, Last Page for Back) rendered to high-DPI image.
 - Professional distinction between Cover Paper Stock (封面用纸/卡纸) and Inner Page Paper Stock (内页用纸).
 - Extensive Paper Spread Sizes (A3, SRA3, A3+, A4, A2, B4, B3, 8开, 4开, 16开, etc.).
-- Extensive Finished Book Sizes (A4, A5, B5, 16开, 正16开, 大16开, 32开, 大32开, 24开, 20开, 方形210x210等).
+- Extensive Finished Book Sizes (A4, A5, B5, 16开正度/大度, 32开正度/大度, 24开, 20开, 正方形等).
 - Softcover (胶订平装) & Hardcover (精装包壳) with wrap edges (包边) & hinge grooves (沟槽).
 - Automatic Mirrored Bleed Extension (镜像延展出血) to eliminate white borders.
 - Barcode / ISBN / QR Code generation and placement.
@@ -17,6 +18,20 @@ import math
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Tuple, List, Dict
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageColor, ImageFilter
+
+# PDF extraction libraries (PyMuPDF or pypdfium2)
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+try:
+    import pypdfium2 as pdfium
+    HAS_PYPDFIUM = True
+except ImportError:
+    HAS_PYPDFIUM = False
+
 
 # Extensive Paper Spread Sizes in mm (Landscape orientation for printing sheets)
 PAPER_SIZES_MM = {
@@ -66,18 +81,69 @@ INNER_PAPER_THICKNESS_MM = {
     "100g 道林纸/特种纸": 0.125,
 }
 
-# Cover Paper Stock Types (for print shop operator reference & record)
+# Cover Paper Stock Types
 COVER_PAPER_STOCK_TYPES = [
     "200g 铜版纸 / 哑粉纸",
     "250g 铜版纸 / 哑粉纸 (标准胶订)",
     "300g 铜版纸 / 哑粉纸 (厚封面)",
     "350g 铜版纸 / 哑粉纸",
     "230g 白卡纸 / 灰底白",
-    "250g 灰皮纸 / 粗皮纹纸",
+    "250g 粗皮纹纸 / 灰皮纸",
     "250g 珠光纸 / 特种艺术纸",
     "157g 铜版纸 + 2.0mm 灰板 (精装硬皮)",
     "157g 铜版纸 + 2.5mm 灰板 (精装硬皮)",
 ]
+
+
+def render_pdf_page_to_image(pdf_path: str, page_num: int = 1, render_dpi: int = 300) -> Optional[Image.Image]:
+    """
+    Render a specific page from a PDF file as a high-DPI PIL RGBA Image.
+    `page_num` is 1-indexed. If page_num < 0, it counts from end (-1 = last page).
+    """
+    if not os.path.isfile(pdf_path):
+        return None
+
+    # Try PyMuPDF
+    if HAS_PYMUPDF:
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            if total_pages == 0:
+                return None
+
+            idx = page_num - 1 if page_num > 0 else total_pages + page_num
+            idx = max(0, min(total_pages - 1, idx))
+
+            page = doc[idx]
+            zoom = render_dpi / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=True)
+
+            img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
+            doc.close()
+            return img
+        except Exception:
+            pass
+
+    # Try pypdfium2
+    if HAS_PYPDFIUM:
+        try:
+            pdf = pdfium.PdfDocument(pdf_path)
+            total_pages = len(pdf)
+            if total_pages == 0:
+                return None
+
+            idx = page_num - 1 if page_num > 0 else total_pages + page_num
+            idx = max(0, min(total_pages - 1, idx))
+
+            page = pdf[idx]
+            image = page.render(scale=render_dpi / 72.0).to_pil().convert("RGBA")
+            pdf.close()
+            return image
+        except Exception:
+            pass
+
+    return None
 
 
 def calculate_spine_thickness(
@@ -87,11 +153,6 @@ def calculate_spine_thickness(
     is_hardcover: bool = False,
     cardboard_thickness_mm: float = 2.0
 ) -> float:
-    """
-    Calculate book spine thickness in mm.
-    Formula: (page_count / 2) * sheet_thickness + cover_margin
-    If Hardcover: Adds cardboard thickness (灰板纸厚度 x2).
-    """
     if page_count <= 0:
         return 0.0
 
@@ -204,6 +265,10 @@ class CoverConfig:
     draw_info_text: bool = True
     fill_mode: str = "fit"
 
+    # PDF page selection parameters
+    front_pdf_page: int = 1             # Page for front cover (1-indexed)
+    back_pdf_page: int = -1             # Page for back cover (-1 = last page)
+
     show_barcode: bool = False
     barcode_text: str = "ISBN 978-7-12345-678-9"
 
@@ -245,25 +310,33 @@ class CoverEngine:
                 continue
         return ImageFont.load_default()
 
-    def check_image_dpi(self, img_path: str, target_w_px: int, target_h_px: int) -> Dict[str, any]:
+    def check_image_dpi(self, img_path: str, target_w_mm: float, target_h_mm: float) -> Dict[str, any]:
         if not img_path or not os.path.isfile(img_path):
             return {"valid": False, "reason": "文件不存在", "effective_dpi": 0}
 
         try:
-            with Image.open(img_path) as img:
-                orig_w, orig_h = img.size
-                eff_dpi_w = round(orig_w / (px_to_mm(target_w_px, self.config.dpi) / 25.4))
-                eff_dpi_h = round(orig_h / (px_to_mm(target_h_px, self.config.dpi) / 25.4))
-                min_dpi = min(eff_dpi_w, eff_dpi_h)
+            if img_path.lower().endswith(".pdf"):
+                pdf_img = render_pdf_page_to_image(img_path, 1, 300)
+                if pdf_img:
+                    orig_w, orig_h = pdf_img.size
+                else:
+                    return {"valid": False, "reason": "无法读取PDF", "effective_dpi": 0}
+            else:
+                with Image.open(img_path) as img:
+                    orig_w, orig_h = img.size
 
-                is_low_res = min_dpi < 200
-                return {
-                    "valid": True,
-                    "orig_size": (orig_w, orig_h),
-                    "effective_dpi": min_dpi,
-                    "is_low_res": is_low_res,
-                    "warning": f"原图尺寸清晰度偏低 ({min_dpi} DPI < 300 DPI)" if is_low_res else "清晰度充足 (≥ 200 DPI)"
-                }
+            eff_dpi_w = round(orig_w / (target_w_mm / 25.4))
+            eff_dpi_h = round(orig_h / (target_h_mm / 25.4))
+            min_dpi = min(eff_dpi_w, eff_dpi_h)
+
+            is_low_res = min_dpi < 200
+            return {
+                "valid": True,
+                "orig_size": (orig_w, orig_h),
+                "effective_dpi": min_dpi,
+                "is_low_res": is_low_res,
+                "warning": f"原图尺寸清晰度偏低 ({min_dpi} DPI < 300 DPI)" if is_low_res else "清晰度充足 (≥ 200 DPI)"
+            }
         except Exception as e:
             return {"valid": False, "reason": str(e), "effective_dpi": 0}
 
@@ -360,7 +433,8 @@ class CoverEngine:
         target_h_px: int,
         fill_mode: str = "fit",
         edit_cfg: Optional[ImageEditConfig] = None,
-        bg_color: Tuple[int, int, int, int] = (255, 255, 255, 255)
+        bg_color: Tuple[int, int, int, int] = (255, 255, 255, 255),
+        pdf_page: int = 1
     ) -> Image.Image:
         if not img_path or not os.path.isfile(img_path):
             blank = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
@@ -370,7 +444,14 @@ class CoverEngine:
                 blank = self._apply_image_edits_and_overlays(blank, edit_cfg, self.config.dpi)
             return blank
 
-        img = Image.open(img_path).convert("RGBA")
+        if img_path.lower().endswith(".pdf"):
+            img = render_pdf_page_to_image(img_path, page_num=pdf_page, render_dpi=self.config.dpi)
+            if img is None:
+                blank = Image.new("RGBA", (target_w_px, target_h_px), bg_color)
+                return blank
+        else:
+            img = Image.open(img_path).convert("RGBA")
+
         orig_w, orig_h = img.size
 
         if fill_mode == "stretch":
@@ -535,8 +616,12 @@ class CoverEngine:
 
         spine_h_px = book_h_px + 2 * extra_margin_px
 
-        back_img = self._load_and_scale_image(back_cover_path, back_w_px, back_h_px, cfg.fill_mode, cfg.back_edit)
-        front_img = self._load_and_scale_image(front_cover_path, front_w_px, front_h_px, cfg.fill_mode, cfg.front_edit)
+        back_img = self._load_and_scale_image(
+            back_cover_path, back_w_px, back_h_px, cfg.fill_mode, cfg.back_edit, pdf_page=cfg.back_pdf_page
+        )
+        front_img = self._load_and_scale_image(
+            front_cover_path, front_w_px, front_h_px, cfg.fill_mode, cfg.front_edit, pdf_page=cfg.front_pdf_page
+        )
 
         if cfg.show_barcode and cfg.barcode_text.strip():
             barcode_w_px = mm_to_px(35.0, dpi)
